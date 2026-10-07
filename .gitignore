@@ -1,0 +1,7 @@
+venv/
+.venv/
+dataset/
+dataset_split/
+models/
+*.keras
+__pycache__/

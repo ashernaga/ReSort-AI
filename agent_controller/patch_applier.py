@@ -1,4 +1,3 @@
-
 import hashlib
 import subprocess
 from pathlib import Path
@@ -78,6 +77,7 @@ def calculate_diff_hash(diff: str) -> str:
 
     return hashlib.sha256(diff.encode("utf-8")).hexdigest()
 
+
 def verify_approval_receipt(proposal: dict, receipt: dict) -> bool:
     """
     Verify that an approval receipt matches the exact proposal
@@ -121,11 +121,5 @@ def verify_approval_receipt(proposal: dict, receipt: dict) -> bool:
         )
 
     ensure_clean_working_tree()
-
-
-    return hashlib.sha256(diff.encode("utf-8")).hexdigest()
-
-
-def verify_approval_receipt(proposal: dict, receipt: dict) -> bool:
 
     return True

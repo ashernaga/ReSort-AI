@@ -1,115 +1,68 @@
 
-
-from claude_agent import ask_claude
 from openai_agent import ask_gpt
+from proposal import generate_proposal
+from approval import request_approval
 
 
 def main():
     print("=" * 60)
-    print("TRASH ML - MULTI-AGENT SYSTEM")
+    print("TRASH ML - HUMAN APPROVAL WORKFLOW")
     print("=" * 60)
 
-    task = """
-    Analyze the Trash ML project and identify its most important
-    opportunities for improvement.
+    task = input("\nWhat change would you like to propose?\n> ").strip()
 
-    Focus on model accuracy, webcam performance, and code quality.
-    Do not modify any project files.
-    """
+    if not task:
+        print("No task provided. Exiting.")
+        return
 
     try:
         # STEP 1: GPT creates an investigation plan
         print("\n[1/3] GPT is preparing an investigation plan...\n")
 
         planning_prompt = f"""
-        You are the planning agent for a Python machine learning project
-        called Trash ML.
+You are the planning agent for the Trash ML Python project.
 
-        Project context:
-        - Uses TensorFlow and MobileNetV2.
-        - Classifies glass, plastic, metal, and general_waste.
-        - Has a webcam prediction feature.
+User task:
+{task}
 
-        User task:
-        {task}
+Create a concise investigation plan for Claude Code.
+Tell Claude which files and functions to inspect.
 
-        Create a concise investigation plan for Claude Code.
-        Claude will have access to the actual project files.
-        Tell Claude what to inspect and what evidence to collect.
-
-        Do not pretend you have inspected the local files.
-        Do not suggest modifying files during this test.
-        """
+Do not pretend you have inspected the local files.
+Do not modify any files.
+"""
 
         gpt_plan = ask_gpt(planning_prompt)
 
-        print("GPT INVESTIGATION PLAN:")
+        print("\nGPT INVESTIGATION PLAN:")
         print("-" * 60)
         print(gpt_plan)
 
-        # STEP 2: Claude inspects the actual project
-        print("\n[2/3] Claude is inspecting the project...\n")
+        # STEP 2: Claude generates a proposed change
+        print("\n[2/3] Claude is generating a proposal...\n")
 
-        claude_prompt = f"""
-        You are the programming and code-analysis agent for Trash ML.
+        proposal = generate_proposal(
+            task=task,
+            investigation_plan=gpt_plan
+        )
 
-        User task:
-        {task}
+        print("\nClaude proposal generated and validated.")
 
-        Investigation plan from GPT:
-        {gpt_plan}
+        # STEP 3: User reviews and decides
+        print("\n[3/3] Waiting for human approval...\n")
 
-        Inspect the actual project files and report your findings.
+        approved = request_approval(proposal)
 
-        Include:
-        1. Important findings with relevant file names.
-        2. Problems or risks you discovered.
-        3. Recommended improvements, in priority order.
-        4. Any uncertainties that need further investigation.
-
-        IMPORTANT:
-        Do not create, edit, delete, or modify any files.
-        Only inspect and report.
-        """
-
-        claude_report = ask_claude(claude_prompt)
-
-        print("CLAUDE REPORT:")
-        print("-" * 60)
-        print(claude_report)
-
-        # STEP 3: GPT reviews Claude's findings
-        print("\n[3/3] GPT is reviewing Claude's report...\n")
-
-        review_prompt = f"""
-        You are the independent reviewer for the Trash ML project.
-
-        Review the following report produced by Claude Code.
-
-        CLAUDE REPORT:
-        {claude_report}
-
-        Evaluate:
-        1. Are the recommendations technically reasonable?
-        2. Are there any unsupported claims?
-        3. What risks should be considered?
-        4. Which three improvements should be prioritized?
-
-        Be critical and specific.
-
-        Important:
-        You cannot access the user's local files yourself.
-        Do not claim to have independently verified Claude's findings.
-        """
-
-        gpt_review = ask_gpt(review_prompt)
-
-        print("GPT FINAL REVIEW:")
-        print("-" * 60)
-        print(gpt_review)
+        if approved:
+            print("\nPROPOSAL AUTHORIZED.")
+            print("No files have been modified.")
+            print("Patch application is not implemented yet.")
+        else:
+            print("\nPROPOSAL REJECTED.")
+            print("No files have been modified.")
 
         print("\n" + "=" * 60)
-        print("MULTI-AGENT TEST COMPLETED SUCCESSFULLY!")
+        print("WORKFLOW COMPLETED")
         print("=" * 60)
 
     except Exception as error:

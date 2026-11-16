@@ -1,6 +1,12 @@
 
 from pathlib import Path
 
+# Support both direct execution and package imports
+if __package__:
+    from .proposal import validate_proposal
+else:
+    from proposal import validate_proposal
+
 # Project root: parent directory of agent_controller
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -54,6 +60,13 @@ def request_approval(proposal: dict) -> bool:
         print("REJECTED: Invalid proposal format.")
         return False
 
+    try:
+        validate_proposal(proposal)
+    except (ValueError, RuntimeError) as error:
+        print(f"REJECTED: Proposal validation failed: {error}")
+        print("\nNo changes authorized.")
+        return False
+
     files = proposal.get("files")
 
     if not validate_proposal_files(files):
@@ -74,6 +87,10 @@ def request_approval(proposal: dict) -> bool:
 
     print("\nCHANGE DETAILS:")
     print(proposal.get("details", "No details provided."))
+    print("\nEXACT PROPOSED DIFF:")
+    print("=" * 60)
+    print(proposal["diff"])
+    print("=" * 60)
 
     print("\n" + "-" * 60)
     print("Type APPROVE to accept this proposal.")

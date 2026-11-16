@@ -11,6 +11,42 @@ else:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+def _ensure_clean_working_tree() -> None:
+    """Reject operations when the Git working tree is not clean."""
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+
+    except FileNotFoundError as error:
+        raise RuntimeError("Git executable was not found.") from error
+
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            "Git working-tree check timed out."
+        ) from error
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Could not check Git working-tree status:\n"
+            + result.stderr.strip()
+        )
+
+    if result.stdout.strip():
+        raise ValueError(
+            "Git working tree is not clean. "
+            "Commit or safely stash your changes before applying a patch:\n"
+            + result.stdout.strip()
+        )
+
 def _check_git_patch(diff: str) -> None:
     """Check whether Git accepts a patch without applying it."""
 

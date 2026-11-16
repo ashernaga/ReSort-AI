@@ -1,58 +1,19 @@
 
-from pathlib import Path
-
 # Support both direct execution and package imports
 if __package__:
     from .proposal import validate_proposal
     from .patch_applier import (
         get_current_commit,
+        ensure_clean_working_tree,
         calculate_diff_hash,
     )
 else:
     from proposal import validate_proposal
     from patch_applier import (
         get_current_commit,
+        ensure_clean_working_tree,
         calculate_diff_hash,
     )
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-
-def validate_proposal_files(files: list) -> bool:
-    """Ensure proposed files are inside the project directory."""
-
-    if not isinstance(files, list) or not files:
-        print("REJECTED: No valid files specified.")
-        return False
-
-    for file_path in files:
-        if not isinstance(file_path, str) or not file_path.strip():
-            print("REJECTED: Invalid file path.")
-            return False
-
-        proposed_path = Path(file_path)
-
-        if proposed_path.is_absolute():
-            print(f"REJECTED: Absolute paths are not allowed: {file_path}")
-            return False
-
-        if ".." in proposed_path.parts:
-            print(f"REJECTED: Parent-directory traversal detected: {file_path}")
-            return False
-
-        try:
-            resolved_path = (PROJECT_ROOT / proposed_path).resolve()
-
-            if not resolved_path.is_relative_to(PROJECT_ROOT):
-                print(f"REJECTED: Path is outside the project: {file_path}")
-                return False
-
-        except (OSError, RuntimeError, ValueError):
-            print(f"REJECTED: Could not validate path: {file_path}")
-            return False
-
-    return True
 
 
 def request_approval(proposal: dict) -> dict | None:
@@ -60,7 +21,9 @@ def request_approval(proposal: dict) -> dict | None:
     Display a proposed change and request explicit approval.
 
     Returns an approval receipt containing the exact diff hash
-    and Git baseline commit, or None if rejected.
+    and original Git baseline, or None if rejected.
+
+    This function does not apply any changes.
     """
 
     if not isinstance(proposal, dict):
@@ -68,15 +31,23 @@ def request_approval(proposal: dict) -> dict | None:
         return None
 
     try:
+        # Establish a clean Git baseline before displaying the proposal.
+        ensure_clean_working_tree()
+        baseline_commit = get_current_commit()
+
+        # Validate the proposal, including paths and exact diff.
         validate_proposal(proposal)
+
+        # Ensure the repository has not changed during validation.
+        if get_current_commit() != baseline_commit:
+            raise RuntimeError(
+                "Git baseline changed during proposal validation."
+            )
+
+        ensure_clean_working_tree()
+
     except (ValueError, RuntimeError) as error:
         print(f"REJECTED: Proposal validation failed: {error}")
-        print("\nNo changes authorized.")
-        return None
-
-    files = proposal.get("files")
-
-    if not validate_proposal_files(files):
         print("\nNo changes authorized.")
         return None
 
@@ -85,22 +56,22 @@ def request_approval(proposal: dict) -> dict | None:
     print("=" * 60)
 
     print("\nPROPOSED CHANGE:")
-    print(proposal.get("summary", "No summary provided."))
+    print(proposal["summary"])
 
     print("\nFILES AFFECTED:")
 
-    for file_path in files:
+    for file_path in proposal["files"]:
         print(f"  - {file_path}")
 
     print("\nCHANGE DETAILS:")
-    print(proposal.get("details", "No details provided."))
+    print(proposal["details"])
 
     print("\nEXACT PROPOSED DIFF:")
     print("=" * 60)
     print(proposal["diff"])
     print("=" * 60)
 
-    # Capture the exact diff fingerprint before asking for approval.
+    # Fingerprint the exact diff shown to the user.
     diff_hash = calculate_diff_hash(proposal["diff"])
 
     print("\n" + "-" * 60)
@@ -113,8 +84,20 @@ def request_approval(proposal: dict) -> dict | None:
         print("\nProposal rejected. No changes authorized.")
         return None
 
-    # Record the repository baseline at approval time.
-    baseline_commit = get_current_commit()
+    try:
+        # Recheck that the original Git baseline is unchanged.
+        if get_current_commit() != baseline_commit:
+            raise RuntimeError(
+                "Git baseline changed while approval was pending."
+            )
+
+        # Reject any tracked or untracked changes made during approval.
+        ensure_clean_working_tree()
+
+    except (ValueError, RuntimeError) as error:
+        print(f"\nREJECTED: Approval verification failed: {error}")
+        print("A new proposal and approval are required.")
+        return None
 
     receipt = {
         "approved": True,

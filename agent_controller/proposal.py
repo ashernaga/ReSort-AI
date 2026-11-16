@@ -97,7 +97,36 @@ def _validate_project_file(file_path: str) -> Path:
             f"Could not validate file path: {file_path}"
         ) from error
 
+    # Confirm that Git already tracks this file.
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                file_path,
+            ],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(
+            f"Git tracking check timed out: {file_path}"
+        ) from error
+
+    if result.returncode != 0:
+        raise ValueError(
+            f"File is not tracked by Git: {file_path}"
+        )
+
     return resolved
+
 
 def _validate_unified_diff(diff: str) -> set:
     """Accept only standard unified diffs modifying existing project files."""

@@ -4,18 +4,23 @@ from pathlib import Path
 # Support both direct execution and package imports
 if __package__:
     from .proposal import validate_proposal
+    from .patch_applier import (
+        get_current_commit,
+        calculate_diff_hash,
+    )
 else:
     from proposal import validate_proposal
+    from patch_applier import (
+        get_current_commit,
+        calculate_diff_hash,
+    )
 
-# Project root: parent directory of agent_controller
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def validate_proposal_files(files: list) -> bool:
-    """
-    Ensure every proposed file is inside the project directory.
-    Reject absolute paths, traversal, and paths outside the project.
-    """
+    """Ensure proposed files are inside the project directory."""
 
     if not isinstance(files, list) or not files:
         print("REJECTED: No valid files specified.")
@@ -50,28 +55,30 @@ def validate_proposal_files(files: list) -> bool:
     return True
 
 
-def request_approval(proposal: dict) -> bool:
+def request_approval(proposal: dict) -> dict | None:
     """
-    Display a proposed change and request explicit human approval.
-    Returns True only when the user enters exactly APPROVE.
+    Display a proposed change and request explicit approval.
+
+    Returns an approval receipt containing the exact diff hash
+    and Git baseline commit, or None if rejected.
     """
 
     if not isinstance(proposal, dict):
         print("REJECTED: Invalid proposal format.")
-        return False
+        return None
 
     try:
         validate_proposal(proposal)
     except (ValueError, RuntimeError) as error:
         print(f"REJECTED: Proposal validation failed: {error}")
         print("\nNo changes authorized.")
-        return False
+        return None
 
     files = proposal.get("files")
 
     if not validate_proposal_files(files):
         print("\nNo changes authorized.")
-        return False
+        return None
 
     print("\n" + "=" * 60)
     print("HUMAN APPROVAL REQUIRED")
@@ -87,10 +94,14 @@ def request_approval(proposal: dict) -> bool:
 
     print("\nCHANGE DETAILS:")
     print(proposal.get("details", "No details provided."))
+
     print("\nEXACT PROPOSED DIFF:")
     print("=" * 60)
     print(proposal["diff"])
     print("=" * 60)
+
+    # Capture the exact diff fingerprint before asking for approval.
+    diff_hash = calculate_diff_hash(proposal["diff"])
 
     print("\n" + "-" * 60)
     print("Type APPROVE to accept this proposal.")
@@ -98,9 +109,20 @@ def request_approval(proposal: dict) -> bool:
 
     decision = input("\nYour decision: ").strip()
 
-    if decision == "APPROVE":
-        print("\nProposal approved by the user.")
-        return True
+    if decision != "APPROVE":
+        print("\nProposal rejected. No changes authorized.")
+        return None
 
-    print("\nProposal rejected. No changes authorized.")
-    return False
+    # Record the repository baseline at approval time.
+    baseline_commit = get_current_commit()
+
+    receipt = {
+        "approved": True,
+        "diff_hash": diff_hash,
+        "baseline_commit": baseline_commit,
+    }
+
+    print("\nProposal approved by the user.")
+    print("Approval receipt created.")
+
+    return receipt

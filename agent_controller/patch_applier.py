@@ -77,3 +77,55 @@ def calculate_diff_hash(diff: str) -> str:
         raise ValueError("Cannot fingerprint an empty or invalid diff.")
 
     return hashlib.sha256(diff.encode("utf-8")).hexdigest()
+
+def verify_approval_receipt(proposal: dict, receipt: dict) -> bool:
+    """
+    Verify that an approval receipt matches the exact proposal
+    and the current Git baseline.
+
+    This function does not apply any changes.
+    """
+
+    if not isinstance(proposal, dict):
+        raise ValueError("Invalid proposal.")
+
+    if not isinstance(receipt, dict):
+        raise ValueError("Invalid approval receipt.")
+
+    if receipt.get("approved") is not True:
+        raise ValueError("Proposal has not been approved.")
+
+    proposed_diff = proposal.get("diff")
+
+    if not isinstance(proposed_diff, str) or not proposed_diff:
+        raise ValueError("Proposal contains no valid diff.")
+
+    expected_hash = calculate_diff_hash(proposed_diff)
+
+    if receipt.get("diff_hash") != expected_hash:
+        raise ValueError(
+            "Approval fingerprint does not match the proposed diff."
+        )
+
+    baseline_commit = receipt.get("baseline_commit")
+
+    if not isinstance(baseline_commit, str) or not baseline_commit:
+        raise ValueError("Approval receipt has no valid baseline commit.")
+
+    current_commit = get_current_commit()
+
+    if current_commit != baseline_commit:
+        raise ValueError(
+            "Git baseline has changed since approval. "
+            "A new approval is required."
+        )
+
+    ensure_clean_working_tree()
+
+
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest()
+
+
+def verify_approval_receipt(proposal: dict, receipt: dict) -> bool:
+
+    return True

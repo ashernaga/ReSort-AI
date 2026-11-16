@@ -123,3 +123,43 @@ def verify_approval_receipt(proposal: dict, receipt: dict) -> bool:
     ensure_clean_working_tree()
 
     return True
+
+
+def validate_patch_application(proposal: dict, receipt: dict) -> bool:
+    """
+    Perform safety checks before patch application.
+
+    This is a dry-run validation only.
+    No project files are modified.
+    """
+
+    # Support both direct execution and package imports.
+    if __package__:
+        from .proposal import validate_proposal
+    else:
+        from proposal import validate_proposal
+
+    # Verify explicit approval and its exact diff fingerprint.
+    verify_approval_receipt(proposal, receipt)
+
+    # Capture the approved Git baseline.
+    baseline_commit = receipt["baseline_commit"]
+
+    # Revalidate the proposal, including file paths and diff structure.
+    validate_proposal(proposal)
+
+    # Confirm the repository has not changed during validation.
+    if get_current_commit() != baseline_commit:
+        raise RuntimeError(
+            "Git baseline changed during patch validation."
+        )
+
+    ensure_clean_working_tree()
+
+    # Final approval fingerprint check.
+    if calculate_diff_hash(proposal["diff"]) != receipt["diff_hash"]:
+        raise ValueError(
+            "Proposal diff changed during patch validation."
+        )
+
+    return True

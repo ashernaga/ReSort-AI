@@ -1,4 +1,3 @@
-
 import json
 import subprocess
 from pathlib import Path, PureWindowsPath
@@ -100,6 +99,116 @@ def _validate_project_file(file_path: str) -> Path:
 
     return resolved
 
+def _validate_unified_diff(diff: str) -> set:
+    """Accept only standard unified diffs modifying existing project files."""
+
+    import re
+
+    lines = diff.splitlines()
+    diff_files = set()
+    index = 0
+
+    hunk_pattern = re.compile(
+        r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
+    )
+
+    while index < len(lines):
+        # Every file section must begin with standard unified headers.
+        if not lines[index].startswith("--- a/"):
+            raise ValueError(
+                "Unsupported diff metadata or malformed file header."
+            )
+
+        old_path = lines[index][4:].split("\t", 1)[0]
+
+        if index + 1 >= len(lines):
+            raise ValueError("Incomplete unified diff headers.")
+
+        if not lines[index + 1].startswith("+++ b/"):
+            raise ValueError("Malformed unified diff headers.")
+
+        new_path = lines[index + 1][4:].split("\t", 1)[0]
+
+        if old_path[2:] != new_path[2:]:
+            raise ValueError(
+                "File creation, deletion, and renaming are not allowed."
+            )
+
+        file_path = old_path[2:]
+        _validate_project_file(file_path)
+
+        if file_path in diff_files:
+            raise ValueError(f"Duplicate file in diff: {file_path}")
+
+        diff_files.add(file_path)
+        index += 2
+
+        hunk_count = 0
+
+        while index < len(lines) and not lines[index].startswith("--- a/"):
+            match = hunk_pattern.fullmatch(lines[index])
+
+            if not match:
+                raise ValueError(
+                    "Unsupported diff metadata or malformed hunk header."
+                )
+
+            old_expected = (
+                int(match.group(2)) if match.group(2) is not None else 1
+            )
+            new_expected = (
+                int(match.group(4)) if match.group(4) is not None else 1
+            )
+            old_seen = 0
+            new_seen = 0
+            index += 1
+
+            while (
+                old_seen < old_expected
+                or new_seen < new_expected
+            ):
+                if index >= len(lines):
+                    raise ValueError("Incomplete diff hunk.")
+
+                line = lines[index]
+
+                if line.startswith(" "):
+                    old_seen += 1
+                    new_seen += 1
+                elif line.startswith("+"):
+                    new_seen += 1
+                elif line.startswith("-"):
+                    old_seen += 1
+                elif line == "\\ No newline at end of file":
+                    pass
+                else:
+                    raise ValueError("Invalid unified diff hunk line.")
+
+                if (
+                    old_seen > old_expected
+                    or new_seen > new_expected
+                ):
+                    raise ValueError("Diff hunk line counts do not match.")
+
+                index += 1
+
+                if (
+                    index < len(lines)
+                    and lines[index] == "\\ No newline at end of file"
+                ):
+                    index += 1
+
+            hunk_count += 1
+
+        if hunk_count == 0:
+            raise ValueError("Every modified file must contain a diff hunk.")
+
+    if not diff_files:
+        raise ValueError("No valid unified diff file headers found.")
+
+    return diff_files
+
+
 
 def validate_proposal(proposal: dict) -> bool:
     """Validate proposal structure, file paths, and unified diff headers."""
@@ -140,55 +249,10 @@ def validate_proposal(proposal: dict) -> bool:
 
         validated_files.add(file_path)
 
-    # Extract and validate every unified diff file-header pair.
-    diff_files = set()
-    lines = diff.splitlines()
-    index = 0
+    # Validate the complete unified diff structure.
+    diff_files = _validate_unified_diff(diff)
 
-    while index < len(lines):
-        line = lines[index]
-
-        if line.startswith("--- "):
-            if index + 1 >= len(lines):
-                raise ValueError("Incomplete unified diff headers.")
-
-            next_line = lines[index + 1]
-
-            if not next_line.startswith("+++ "):
-                raise ValueError("Malformed unified diff headers.")
-
-            old_path = line[4:].split("\t", 1)[0]
-            new_path = next_line[4:].split("\t", 1)[0]
-
-            if not old_path.startswith("a/") or not new_path.startswith("b/"):
-                raise ValueError(
-                    "Only standard existing-file modifications are allowed."
-                )
-
-            old_file = old_path[2:]
-            new_file = new_path[2:]
-
-            if old_file != new_file:
-                raise ValueError(
-                    "File creation, deletion, and renaming are not allowed."
-                )
-
-            _validate_project_file(old_file)
-
-            if old_file in diff_files:
-                raise ValueError(
-                    f"Duplicate file in diff: {old_file}"
-                )
-
-            diff_files.add(old_file)
-            index += 2
-            continue
-
-        index += 1
-
-    if not diff_files:
-        raise ValueError("No valid unified diff file headers found.")
-
+    # Ensure the declared files match the actual diff.
     if diff_files != validated_files:
         raise ValueError(
             "The files list does not match the files in the unified diff. "

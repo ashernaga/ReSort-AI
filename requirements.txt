@@ -1,0 +1,9 @@
+# ML
+tensorflow==2.21.0
+numpy==2.4.6
+opencv-python==5.0.0.93
+scikit-learn==1.9.1
+
+# Agent controller
+openai==3.51.0
+python-dotenv==1.2.4

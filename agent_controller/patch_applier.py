@@ -1,29 +1,81 @@
+
 import hashlib
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 # Project root: parent of agent_controller
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def get_current_commit() -> str:
-    """Return the current Git commit hash."""
+def _run_git(
+    args: list,
+    cwd: Path,
+    input_text: str = None,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess:
+    """Run Git safely without invoking a shell."""
 
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(PROJECT_ROOT),
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            input=input_text,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=timeout,
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(
-            "Could not retrieve the current Git commit."
+            "Git command failed or timed out."
         ) from error
+
+
+def _is_registered_worktree(worktree_path: Path) -> bool:
+    """Check whether Git has registered the specified worktree."""
+
+    result = _run_git(
+        ["worktree", "list", "--porcelain"],
+        PROJECT_ROOT,
+        timeout=10,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Could not inspect Git worktree registrations:\n"
+            + result.stderr.strip()
+        )
+
+    expected_path = os.path.normcase(
+        os.path.abspath(str(worktree_path))
+    )
+
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            registered_path = line[len("worktree "):]
+
+            actual_path = os.path.normcase(
+                os.path.abspath(registered_path)
+            )
+
+            if actual_path == expected_path:
+                return True
+
+    return False
+
+
+def get_current_commit() -> str:
+    """Return the current Git commit hash."""
+
+    result = _run_git(
+        ["rev-parse", "HEAD"],
+        PROJECT_ROOT,
+        timeout=10,
+    )
 
     if result.returncode != 0:
         raise RuntimeError(
@@ -41,21 +93,11 @@ def get_current_commit() -> str:
 def ensure_clean_working_tree() -> None:
     """Reject operations if tracked or untracked files have changed."""
 
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError(
-            "Could not verify Git working-tree status."
-        ) from error
+    result = _run_git(
+        ["status", "--porcelain", "--untracked-files=all"],
+        PROJECT_ROOT,
+        timeout=10,
+    )
 
     if result.returncode != 0:
         raise RuntimeError(
@@ -133,22 +175,17 @@ def validate_patch_application(proposal: dict, receipt: dict) -> bool:
     No project files are modified.
     """
 
-    # Support both direct execution and package imports.
     if __package__:
         from .proposal import validate_proposal
     else:
         from proposal import validate_proposal
 
-    # Verify explicit approval and its exact diff fingerprint.
     verify_approval_receipt(proposal, receipt)
 
-    # Capture the approved Git baseline.
     baseline_commit = receipt["baseline_commit"]
 
-    # Revalidate the proposal, including file paths and diff structure.
     validate_proposal(proposal)
 
-    # Confirm the repository has not changed during validation.
     if get_current_commit() != baseline_commit:
         raise RuntimeError(
             "Git baseline changed during patch validation."
@@ -156,10 +193,277 @@ def validate_patch_application(proposal: dict, receipt: dict) -> bool:
 
     ensure_clean_working_tree()
 
-    # Final approval fingerprint check.
     if calculate_diff_hash(proposal["diff"]) != receipt["diff_hash"]:
         raise ValueError(
             "Proposal diff changed during patch validation."
         )
 
     return True
+
+
+def verify_patch_in_temporary_worktree(
+    proposal: dict,
+    receipt: dict,
+) -> dict:
+    """
+    Test an approved patch inside a temporary detached Git worktree.
+
+    The real project files are never modified by the patch.
+    No commit, merge, or copy-back operation is performed.
+    """
+
+    if __package__:
+        from .proposal import validate_proposal
+    else:
+        from proposal import validate_proposal
+
+    # Verify approval, baseline, and original working-tree cleanliness.
+    verify_approval_receipt(proposal, receipt)
+
+    baseline_commit = receipt["baseline_commit"]
+    approved_diff = proposal["diff"]
+    approved_hash = receipt["diff_hash"]
+
+    # Revalidate proposal paths and diff structure.
+    validate_proposal(proposal)
+
+    # Confirm that the original repository is still unchanged.
+    if get_current_commit() != baseline_commit:
+        raise RuntimeError(
+            "Git baseline changed during proposal validation."
+        )
+
+    ensure_clean_working_tree()
+
+    if calculate_diff_hash(approved_diff) != approved_hash:
+        raise ValueError(
+            "Proposal diff changed during validation."
+        )
+
+    expected_files = set(proposal["files"])
+
+    with tempfile.TemporaryDirectory(
+        prefix="trash_ml_patch_test_"
+    ) as temporary_directory:
+
+        worktree_path = Path(temporary_directory) / "worktree"
+
+        try:
+            # Create an isolated worktree at the approved commit.
+            add_result = _run_git(
+                [
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(worktree_path),
+                    baseline_commit,
+                ],
+                PROJECT_ROOT,
+                timeout=60,
+            )
+
+            # Check Git's registry even if the add command failed.
+            worktree_registered = _is_registered_worktree(
+                worktree_path
+            )
+
+            if add_result.returncode != 0:
+                raise RuntimeError(
+                    "Could not create temporary Git worktree:\n"
+                    + add_result.stderr.strip()
+                )
+
+            if not worktree_registered:
+                raise RuntimeError(
+                    "Git did not register the temporary worktree."
+                )
+
+            # Confirm the temporary worktree starts at the approved commit.
+            head_result = _run_git(
+                ["rev-parse", "HEAD"],
+                worktree_path,
+                timeout=10,
+            )
+
+            if head_result.returncode != 0:
+                raise RuntimeError(
+                    "Could not verify temporary worktree commit."
+                )
+
+            if head_result.stdout.strip() != baseline_commit:
+                raise RuntimeError(
+                    "Temporary worktree does not match "
+                    "the approved baseline."
+                )
+
+            # Check the exact approved patch before applying it.
+            check_result = _run_git(
+                ["apply", "--check", "--"],
+                worktree_path,
+                input_text=approved_diff,
+                timeout=30,
+            )
+
+            if check_result.returncode != 0:
+                raise ValueError(
+                    "Approved patch failed Git apply check:\n"
+                    + check_result.stderr.strip()
+                )
+
+            # Apply the exact same diff without regenerating it.
+            apply_result = _run_git(
+                ["apply", "--"],
+                worktree_path,
+                input_text=approved_diff,
+                timeout=30,
+            )
+
+            if apply_result.returncode != 0:
+                raise RuntimeError(
+                    "Patch application failed in temporary worktree:\n"
+                    + apply_result.stderr.strip()
+                )
+
+            # Confirm that the patch did not create untracked files.
+            untracked_result = _run_git(
+                [
+                    "ls-files",
+                    "--others",
+                    "-z",
+                ],
+                worktree_path,
+                timeout=10,
+            )
+
+            if untracked_result.returncode != 0:
+                raise RuntimeError(
+                    "Could not verify temporary worktree files."
+                )
+
+            if untracked_result.stdout:
+                raise ValueError(
+                    "Patch created unexpected untracked files."
+                )
+                        # Confirm that the patch did not stage any changes.
+            staged_result = _run_git(
+                ["diff", "--cached", "--quiet"],
+                worktree_path,
+                timeout=10,
+            )
+
+            if staged_result.returncode == 1:
+                raise ValueError(
+                    "Patch produced unexpected staged changes."
+                )
+
+            if staged_result.returncode != 0:
+                raise RuntimeError(
+                    "Could not verify staged changes."
+                )
+
+            # Inspect actual changed paths and change types.
+            changes_result = _run_git(
+                [
+                    "diff",
+                    "--name-status",
+                    "--no-renames",
+                    "-z",
+                ],
+                worktree_path,
+                timeout=10,
+            )
+
+            if changes_result.returncode != 0:
+                raise RuntimeError(
+                    "Could not inspect temporary worktree changes."
+                )
+
+            records = [
+                record
+                for record in changes_result.stdout.split("\0")
+                if record
+            ]
+
+            if len(records) % 2 != 0:
+                raise RuntimeError(
+                    "Unexpected Git change-list format."
+                )
+
+            actual_files = set()
+
+            for index in range(0, len(records), 2):
+                change_type = records[index]
+                file_path = records[index + 1]
+
+                # Only modifications to existing files are permitted.
+                if change_type != "M":
+                    raise ValueError(
+                        "Unexpected patch change type: "
+                        + change_type
+                    )
+
+                actual_files.add(file_path)
+
+            if actual_files != expected_files:
+                raise ValueError(
+                    "Patch changed files outside the approved file list. "
+                    f"Expected: {sorted(expected_files)}; "
+                    f"actual: {sorted(actual_files)}"
+                )
+
+            # Verify the temporary worktree HEAD was not changed.
+            final_head = _run_git(
+                ["rev-parse", "HEAD"],
+                worktree_path,
+                timeout=10,
+            )
+
+            if (
+                final_head.returncode != 0
+                or final_head.stdout.strip() != baseline_commit
+            ):
+                raise RuntimeError(
+                    "Temporary worktree commit changed unexpectedly."
+                )
+
+            # Verify that the original repository remains unchanged.
+            if get_current_commit() != baseline_commit:
+                raise RuntimeError(
+                    "Original repository commit changed "
+                    "during verification."
+                )
+
+            ensure_clean_working_tree()
+
+            if calculate_diff_hash(approved_diff) != approved_hash:
+                raise ValueError(
+                    "Approved diff fingerprint changed "
+                    "during verification."
+                )
+
+            return {
+                "verified": True,
+                "baseline_commit": baseline_commit,
+                "changed_files": sorted(actual_files),
+                "diff_hash": approved_hash,
+            }
+
+        finally:
+            # Always inspect Git's registry, including after partial failure.
+            if _is_registered_worktree(worktree_path):
+                remove_result = _run_git(
+                    [
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(worktree_path),
+                    ],
+                    PROJECT_ROOT,
+                    timeout=60,
+                )
+
+                if remove_result.returncode != 0:
+                    raise RuntimeError(
+                        "Could not clean up temporary Git worktree:\n"
+                        + remove_result.stderr.strip()
+                    )

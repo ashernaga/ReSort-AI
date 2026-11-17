@@ -34,11 +34,11 @@ def ask_claude(prompt: str) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=300,
+        timeout=600,
         check=False,
     )
     except subprocess.TimeoutExpired:
-        raise RuntimeError("Claude timed out after 5 minutes.")
+        raise RuntimeError("Claude timed out after 10 minutes.")
 
     if result.returncode != 0:
         raise RuntimeError(

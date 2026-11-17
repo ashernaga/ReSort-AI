@@ -387,11 +387,30 @@ def validate_proposal(proposal: dict) -> bool:
     return True
 
 
+def _extract_json(raw_response: str) -> str:
+    """Strip Markdown fences or surrounding text around a JSON object."""
+
+    text = raw_response.strip()
+
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        text = text.rsplit("```", 1)[0].strip()
+
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+
+        if start != -1 and end > start:
+            text = text[start:end + 1]
+
+    return text
+
+
 def parse_proposal(raw_response: str) -> dict:
     """Parse and validate Claude's JSON proposal."""
 
     try:
-        proposal = json.loads(raw_response)
+        proposal = json.loads(_extract_json(raw_response))
     except json.JSONDecodeError as error:
         raise ValueError(
             "Claude did not return valid JSON. "
@@ -451,9 +470,26 @@ Do not claim that changes have been applied.
 
     print("\nClaude is preparing a proposed change...")
 
-    raw_response = ask_claude(prompt)
+    proposal = None
+    last_error = None
 
-    proposal = parse_proposal(raw_response)
+    for attempt in range(2):
+        raw_response = ask_claude(prompt)
+
+        try:
+            proposal = parse_proposal(raw_response)
+            break
+        except ValueError as error:
+            last_error = error
+            print(f"Proposal attempt {attempt + 1} was invalid: {error}")
+
+            prompt += (
+                "\n\nYour previous answer was rejected: "
+                f"{error}\nReturn ONLY the corrected JSON object."
+            )
+
+    if proposal is None:
+        raise last_error
 
     print("Claude proposal received and validated.")
 

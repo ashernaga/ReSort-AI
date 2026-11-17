@@ -26,6 +26,10 @@ parser.add_argument(
     "--overwrite", action="store_true",
     help="allow replacing an existing model file"
 )
+parser.add_argument(
+    "--fine-tune-layers", type=int, default=0,
+    help="after training, unfreeze the last N MobileNetV2 layers and fine-tune (0 = off)"
+)
 args = parser.parse_args()
 
 DATASET_DIR = Path(args.data_dir)
@@ -96,6 +100,8 @@ data_augmentation = keras.Sequential([
     layers.RandomFlip("horizontal"),
     layers.RandomRotation(0.1),
     layers.RandomZoom(0.1),
+    layers.RandomBrightness(0.2),
+    layers.RandomContrast(0.2),
 ])
 
 
@@ -199,6 +205,43 @@ history = model.fit(
     epochs=EPOCHS,
     callbacks=callbacks
 )
+
+
+# =========================
+# FINE-TUNING (optional)
+# =========================
+
+if args.fine_tune_layers > 0:
+    print(f"\nFine-tuning last {args.fine_tune_layers} layers...\n")
+    phase1_best_val_loss = min(history.history["val_loss"])
+    phase1_weights = model.get_weights()
+
+    base_model.trainable = True
+    for layer in base_model.layers[:-args.fine_tune_layers]:
+        layer.trainable = False
+    for layer in base_model.layers[-args.fine_tune_layers:]:
+        # Keep BatchNormalization layers frozen
+        layer.trainable = not isinstance(layer, layers.BatchNormalization)
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=1e-5),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    fine_tune_history = model.fit(
+        train_dataset,
+        validation_data=validation_dataset,
+        epochs=15,
+        callbacks=callbacks
+    )
+
+    if min(fine_tune_history.history["val_loss"]) < phase1_best_val_loss:
+        for key, values in fine_tune_history.history.items():
+            history.history[key] = history.history[key] + values
+    else:
+        print("\nFine-tuning did not improve val_loss; keeping the original weights.")
+        model.set_weights(phase1_weights)
 
 
 # =========================

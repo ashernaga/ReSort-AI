@@ -2,8 +2,9 @@ venv/
 .venv/
 dataset/
 dataset_split/
-models/
+models/*
 *.keras
+!models/garbage_v2.keras
 __pycache__/
 .env
 .env.*

@@ -124,7 +124,8 @@ Press `Q` to quit.
 | `scripts/` | PowerShell helpers for the workflow |
 | `dataset_4class/` | TrashNet images in the four classes |
 
-Not stored in Git: `dataset/`, `dataset_split/`, `models/` and `.env`.
+Not stored in Git: `dataset/`, `dataset_split/`, other files in `models/`, and `.env`.
+The trained v2 model is included as `models/garbage_v2.keras`, so a fresh clone can run `webcam.py` and `evaluate.py` with `--model-path models/garbage_v2.keras`.
 
 ## GPT + Claude approval workflow
 

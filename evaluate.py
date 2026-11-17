@@ -1,5 +1,7 @@
+import csv
 from pathlib import Path
 
+import cv2
 import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
 import numpy as np
@@ -72,6 +74,7 @@ print("\nGenerating predictions...")
 
 y_true = []
 y_pred = []
+y_conf = []
 
 for images, labels in test_dataset:
 
@@ -87,6 +90,7 @@ for images, labels in test_dataset:
 
     y_true.extend(labels.numpy())
     y_pred.extend(predicted_classes)
+    y_conf.extend(np.max(predictions, axis=1))
 
 
 # =========================
@@ -127,6 +131,54 @@ for path in wrong_as_metal:
 print(f"False negatives (metal predicted as other): {len(missed_metal)}")
 for path, predicted in missed_metal:
     print(f"  {path} -> {predicted}")
+
+# =========================
+# ERROR REPORT (ALL CLASSES)
+# =========================
+
+ERROR_REPORT_PATH = Path("models/error_report.csv")
+ERROR_SHEET_PATH = Path("models/error_sheet.jpg")
+SHEET_COLUMNS = 6
+SHEET_MAX_IMAGES = 30
+
+errors = sorted(
+    (
+        (file_paths[i], CLASS_NAMES[y_true[i]], CLASS_NAMES[y_pred[i]], float(y_conf[i]))
+        for i in range(len(y_true))
+        if y_true[i] != y_pred[i]
+    ),
+    key=lambda row: -row[3]
+)
+
+with open(ERROR_REPORT_PATH, "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["path", "true_label", "predicted_label", "confidence"])
+    for path, true_name, pred_name, conf in errors:
+        writer.writerow([path, true_name, pred_name, f"{conf:.4f}"])
+
+tiles = []
+for path, true_name, pred_name, conf in errors[:SHEET_MAX_IMAGES]:
+    img = cv2.imread(path)
+    if img is None:
+        continue
+    img = cv2.resize(img, IMG_SIZE)
+    label = f"true:{true_name} pred:{pred_name} {conf:.0%}"
+    cv2.putText(img, label, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(img, label, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+    tiles.append(img)
+
+if tiles:
+    while len(tiles) % SHEET_COLUMNS:
+        tiles.append(np.zeros_like(tiles[0]))
+    rows = [np.hstack(tiles[r:r + SHEET_COLUMNS]) for r in range(0, len(tiles), SHEET_COLUMNS)]
+    cv2.imwrite(str(ERROR_SHEET_PATH), np.vstack(rows))
+
+print("\n--------------------------------")
+print("Error report (all classes)")
+print("--------------------------------")
+print(f"Misclassified: {len(errors)} of {len(y_true)}")
+print(f"Full list:     {ERROR_REPORT_PATH}")
+print(f"Contact sheet: {ERROR_SHEET_PATH} (most confident errors first)")
 
 
 # =========================

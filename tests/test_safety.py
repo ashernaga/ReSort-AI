@@ -356,6 +356,86 @@ class DiffStructureTests(TemporaryRepoTestCase):
         self.assert_repo_untouched()
 
 
+class DisplaySpoofingTests(TemporaryRepoTestCase):
+    """Text shown for approval must display exactly as written."""
+
+    UNSAFE = {
+        "ANSI escape": "\x1b[2K\x1b[1A",
+        "bare carriage return": "\rhidden",
+        "backspace": "\x08",
+        "form feed": "\x0c",
+        "delete": "\x7f",
+        "C1 control sequence introducer": "\x9b2K",
+        "next line": "\x85",
+        "right-to-left override": "‮",
+        "left-to-right isolate": "⁦",
+        "zero-width space": "​",
+        "byte order mark": "﻿",
+        "line separator": " ",
+        "paragraph separator": " ",
+        "tag character": "\U000e0041",
+    }
+
+    def test_unsafe_characters_in_diff_rejected(self):
+        for name, text in self.UNSAFE.items():
+            with self.subTest(name=name):
+                diff = GOOD_DIFF.replace(
+                    "return 2", "return 2  # " + text
+                )
+
+                with self.assertRaises(ValueError) as caught:
+                    proposal_module.validate_proposal(make_proposal(diff))
+
+                self.assertIn("Proposal diff", str(caught.exception))
+
+    def test_unsafe_characters_in_summary_and_details_rejected(self):
+        for field in ("summary", "details"):
+            with self.subTest(field=field):
+                proposal = make_proposal()
+                proposal[field] = "Harmless \x1b[8m hidden text"
+
+                with self.assertRaises(ValueError):
+                    proposal_module.validate_proposal(proposal)
+
+    def test_error_reports_code_point_and_line(self):
+        diff = GOOD_DIFF.replace("return 2", "return 2 \x1b[0m")
+
+        with self.assertRaises(ValueError) as caught:
+            proposal_module.validate_proposal(make_proposal(diff))
+
+        self.assertIn("U+001B on line 6", str(caught.exception))
+
+    def test_unsafe_proposal_is_never_displayed(self):
+        diff = GOOD_DIFF.replace("return 2", "return 2 \x1b[2K")
+        output = io.StringIO()
+
+        with mock.patch.object(builtins, "input", lambda *_: "APPROVE"):
+            with contextlib.redirect_stdout(output):
+                receipt = approval.request_approval(make_proposal(diff))
+
+        self.assertIsNone(receipt)
+        self.assertNotIn("\x1b", output.getvalue())
+
+    def test_visible_unicode_and_tabs_accepted(self):
+        diff = (
+            "--- a/other.py\n"
+            "+++ b/other.py\n"
+            "@@ -1 +1 @@\n"
+            "-y = 1\n"
+            "+y = 'café 中文 \U0001f600'\t# tab\n"
+        )
+        proposal = make_proposal(diff, ["other.py"])
+        proposal["summary"] = "Résumé 中文"
+
+        self.assertTrue(proposal_module.validate_proposal(proposal))
+
+    def test_crlf_line_endings_accepted_by_text_check(self):
+        proposal_module._reject_unsafe_text("a\r\nb\r\n", "Text")
+
+    def tearDown(self):
+        self.assert_repo_untouched()
+
+
 class DirtyWorkingTreeTests(TemporaryRepoTestCase):
 
     def assert_rejected(self):

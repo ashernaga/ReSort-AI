@@ -1,5 +1,6 @@
 import json
 import subprocess
+import unicodedata
 from pathlib import Path, PureWindowsPath
 
 # Support both direct execution and package imports
@@ -82,6 +83,44 @@ def _check_git_patch(diff: str) -> None:
 
 
 
+
+
+def _reject_unsafe_text(text: str, label: str) -> None:
+    """
+    Reject characters that could make displayed text differ from
+    the text that would actually be applied.
+
+    Terminal control characters (such as ANSI escapes or a bare
+    carriage return) can hide or overwrite lines on screen. Invisible
+    and bidirectional Unicode characters can reorder or conceal code.
+
+    Only tab, line feed, and a carriage return immediately followed
+    by a line feed are permitted among control characters.
+    """
+
+    # Cc: control, Cf: invisible formatting (bidi, zero-width, tags),
+    # Cs: surrogates, Zl/Zp: Unicode line and paragraph separators.
+    unsafe_categories = {"Cc", "Cf", "Cs", "Zl", "Zp"}
+
+    line_number = 1
+
+    for position, char in enumerate(text):
+        if char == "\n":
+            line_number += 1
+            continue
+
+        if char == "\t":
+            continue
+
+        if char == "\r" and text[position + 1:position + 2] == "\n":
+            continue
+
+        if unicodedata.category(char) in unsafe_categories:
+            raise ValueError(
+                f"{label} contains a disallowed control or invisible "
+                f"character U+{ord(char):04X} on line {line_number}. "
+                "Remove it and use plain visible text."
+            )
 
 
 def _validate_project_file(file_path: str) -> Path:
@@ -356,6 +395,11 @@ def validate_proposal(proposal: dict) -> bool:
 
     if not isinstance(diff, str) or not diff.strip():
         raise ValueError("Proposal diff is missing.")
+
+    # Everything shown to the user must display exactly as written.
+    _reject_unsafe_text(proposal["summary"], "Proposal summary")
+    _reject_unsafe_text(proposal["details"], "Proposal details")
+    _reject_unsafe_text(diff, "Proposal diff")
 
     files = proposal["files"]
 

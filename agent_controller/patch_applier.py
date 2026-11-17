@@ -102,7 +102,13 @@ def get_current_commit() -> str:
 
 
 def ensure_clean_working_tree() -> None:
-    """Reject operations if tracked or untracked files have changed."""
+    """
+    Reject operations if tracked or untracked files have changed.
+
+    Files ignored by Git are deliberately not checked. The project
+    always contains ignored files (venv, .env, models, datasets), and
+    proposals can only modify tracked files.
+    """
 
     result = _run_git(
         ["status", "--porcelain", "--untracked-files=all"],

@@ -123,6 +123,46 @@ def _reject_unsafe_text(text: str, label: str) -> None:
             )
 
 
+# Names that may not appear anywhere in a proposed path.
+# These hold Git metadata or configuration for Git, editors, and agents.
+PROTECTED_NAMES = {
+    ".git",
+    ".gitmodules",
+    ".gitignore",
+    ".gitattributes",
+    ".vscode",
+    ".claude",
+    ".agents",
+    ".github",
+}
+
+# Top-level entries that proposals may not modify. These are the safety
+# controller, the scripts that launch it, its tests, and the project
+# instructions. Change them by hand, outside the approval workflow.
+PROTECTED_TOP_LEVEL = {
+    "agent_controller",
+    "scripts",
+    "tests",
+    "claude.md",
+}
+
+
+def _reject_protected_path(parts: list, file_path: str) -> None:
+    """Reject paths that proposals are never allowed to modify."""
+
+    folded = [part.casefold() for part in parts]
+
+    if (
+        any(part in PROTECTED_NAMES for part in folded)
+        or any(part.startswith(".env") for part in folded)
+        or (folded and folded[0] in PROTECTED_TOP_LEVEL)
+    ):
+        raise ValueError(
+            f"Protected project path: {file_path}. "
+            "Proposals cannot modify this file."
+        )
+
+
 def _validate_project_file(file_path: str) -> Path:
     """Validate that a path identifies a safe, tracked project file."""
 
@@ -152,18 +192,8 @@ def _validate_project_file(file_path: str) -> Path:
     ):
         raise ValueError(f"Absolute paths are not allowed: {file_path}")
 
-    # Protect Git metadata and repository configuration.
-    protected_names = {
-        ".git",
-        ".gitmodules",
-        ".gitignore",
-    }
-
-    for part in parts:
-        if part.casefold() in protected_names:
-            raise ValueError(
-                f"Protected project path: {file_path}"
-            )
+    # Protect Git metadata, tool configuration, and the controller itself.
+    _reject_protected_path(parts, file_path)
 
     # Reject Windows-invalid names and alternate data streams.
     reserved_names = {
@@ -214,6 +244,13 @@ def _validate_project_file(file_path: str) -> Path:
             raise ValueError(
                 f"Path must identify an existing file: {file_path}"
             )
+
+        # Repeat the check on the real path, so an alternative spelling
+        # (such as a Windows short name) cannot reach a protected file.
+        _reject_protected_path(
+            list(resolved.relative_to(root).parts),
+            file_path,
+        )
 
     except (OSError, RuntimeError) as error:
         raise ValueError(

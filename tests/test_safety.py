@@ -293,6 +293,80 @@ class PathValidationTests(TemporaryRepoTestCase):
             )
 
 
+class ProtectedPathTests(TemporaryRepoTestCase):
+    """Proposals cannot modify the controller or tool configuration."""
+
+    PROTECTED = [
+        "agent_controller/main.py",
+        "Agent_Controller/main.py",
+        "scripts/run_agent.ps1",
+        "tests/test_safety.py",
+        "CLAUDE.md",
+        "claude.md",
+        ".gitattributes",
+        ".vscode/settings.json",
+        ".claude/settings.json",
+        ".github/workflows/ci.yml",
+        "sub/.vscode/settings.json",
+        ".env.example",
+    ]
+
+    ALLOWED = [
+        "sample.py",
+        "sub/scripts/tool.py",
+        "sub/tests/helper.py",
+        "environment.py",
+    ]
+
+    def setUp(self):
+        super().setUp()
+
+        for path in self.PROTECTED + self.ALLOWED:
+            target = self.repo / path
+
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self.write(path, "value = 1\n")
+
+        self.git("add", "-A", "-f")
+        self.git("commit", "-q", "-m", "more files")
+        self.base_commit = self.git("rev-parse", "HEAD").strip()
+
+    def test_protected_paths_rejected(self):
+        for path in self.PROTECTED:
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError) as caught:
+                    proposal_module._validate_project_file(path)
+
+                self.assertIn(
+                    "Protected project path", str(caught.exception)
+                )
+
+    def test_protected_path_rejected_in_full_proposal(self):
+        diff = (
+            "--- a/agent_controller/main.py\n"
+            "+++ b/agent_controller/main.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            proposal_module.validate_proposal(
+                make_proposal(diff, ["agent_controller/main.py"])
+            )
+
+        self.assertIn("Protected project path", str(caught.exception))
+
+    def test_similar_unprotected_paths_allowed(self):
+        for path in self.ALLOWED:
+            with self.subTest(path=path):
+                proposal_module._validate_project_file(path)
+
+    def tearDown(self):
+        self.assert_repo_untouched()
+
+
 class DiffStructureTests(TemporaryRepoTestCase):
 
     def assert_rejected(self, proposal):
@@ -456,6 +530,24 @@ class DirtyWorkingTreeTests(TemporaryRepoTestCase):
     def test_untracked_file(self):
         (self.repo / "stray.txt").write_bytes(b"x")
         self.assert_rejected()
+
+    def test_ignored_file_does_not_block(self):
+        """Ignored files (venv, .env, models) are expected to exist."""
+        (self.repo / "junk.ignored").write_bytes(b"x")
+        proposal = make_proposal()
+
+        self.assertTrue(
+            patch_applier.validate_patch_application(
+                proposal, self.receipt(proposal)
+            )
+        )
+
+        result = patch_applier.verify_patch_in_temporary_worktree(
+            proposal, self.receipt(proposal)
+        )
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(self.worktree_count(), 1)
 
     def test_unstaged_change(self):
         self.write("other.py", "y = 5\n")

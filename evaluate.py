@@ -163,10 +163,11 @@ for path, predicted in missed_metal:
 # ERROR REPORT (ALL CLASSES)
 # =========================
 
-# The original model keeps its original output names
-_suffix = "" if MODEL_PATH.stem == "garbage_mobilenetv2" else f"_{MODEL_PATH.stem}"
-ERROR_REPORT_PATH = Path(f"models/error_report{_suffix}.csv")
-ERROR_SHEET_PATH = Path(f"models/error_sheet{_suffix}.jpg")
+# Include the model's folder name so reports from different models do not collide
+_folder = MODEL_PATH.resolve().parent.name
+_suffix = f"_{_folder}_{MODEL_PATH.stem}"
+ERROR_REPORT_PATH = MODEL_PATH.parent / f"error_report{_suffix}.csv"
+ERROR_SHEET_PATH = MODEL_PATH.parent / f"error_sheet{_suffix}.jpg"
 SHEET_COLUMNS = 6
 SHEET_MAX_IMAGES = 30
 

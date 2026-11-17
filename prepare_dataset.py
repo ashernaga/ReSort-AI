@@ -95,14 +95,14 @@ def import_extra_sources():
             ):
                 continue
             size = image_file.stat().st_size
-            if used + size > MAX_TOTAL_BYTES:
-                print("Size cap reached; stopping import.")
-                print(f"{class_name:15} {added:5} added, {skipped:5} duplicates")
-                return
             digest = file_hash(image_file)
             if digest in seen:
                 skipped += 1
                 continue
+            if used + size > MAX_TOTAL_BYTES:
+                print("Size cap reached; stopping import.")
+                print(f"{class_name:15} {added:5} added, {skipped:5} duplicates")
+                return
             seen.add(digest)
             shutil.copy2(
                 image_file,

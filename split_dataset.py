@@ -38,6 +38,10 @@ def build_v2_split():
     rng = random.Random(42)
     train_share = TRAIN_RATIO / (TRAIN_RATIO + VAL_RATIO)
 
+    # Rebuild from scratch so stale files from earlier runs do not linger
+    if V2_DIR.exists():
+        shutil.rmtree(V2_DIR)
+
     for split in ["train", "validation"]:
         for class_name in classes:
             target = V2_DIR / split / class_name

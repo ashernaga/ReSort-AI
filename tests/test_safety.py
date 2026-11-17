@@ -620,5 +620,215 @@ class ApprovalPromptTests(TemporaryRepoTestCase):
         self.assertIsNone(self.ask("APPROVE"))
 
 
+class DiffNormalizationTests(TemporaryRepoTestCase):
+    """Common formatting differences are tidied when parsing."""
+
+    GIT_HEADERS = (
+        "diff --git a/sample.py b/sample.py\n"
+        "index 1111111..2222222 100644\n"
+    )
+
+    def parse(self, diff, files=("sample.py",)):
+        import json
+
+        return proposal_module.parse_proposal(
+            json.dumps(make_proposal(diff, files))
+        )
+
+    def test_valid_diff_is_unchanged(self):
+        self.assertEqual(
+            proposal_module._normalize_diff(GOOD_DIFF), GOOD_DIFF
+        )
+
+    def test_normalization_is_idempotent(self):
+        messy = "\n" + self.GIT_HEADERS + GOOD_DIFF[:-2] + "\n\n"
+        once = proposal_module._normalize_diff(messy)
+
+        self.assertEqual(once, GOOD_DIFF)
+        self.assertEqual(proposal_module._normalize_diff(once), once)
+
+    def test_git_headers_removed(self):
+        parsed = self.parse(self.GIT_HEADERS + GOOD_DIFF)
+        self.assertEqual(parsed["diff"], GOOD_DIFF)
+
+    def test_missing_final_newline_added(self):
+        parsed = self.parse(GOOD_DIFF[:-1])
+        self.assertEqual(parsed["diff"], GOOD_DIFF)
+
+    def test_empty_context_line_repaired(self):
+        # The final context line has lost its leading space.
+        parsed = self.parse(GOOD_DIFF[:-2] + "\n")
+        self.assertEqual(parsed["diff"], GOOD_DIFF)
+
+    def test_surrounding_blank_lines_removed(self):
+        parsed = self.parse("\n\n" + GOOD_DIFF + "\n\n")
+        self.assertEqual(parsed["diff"], GOOD_DIFF)
+
+    def test_two_files_with_git_headers(self):
+        second = (
+            "diff --git a/other.py b/other.py\n"
+            "index 3333333..4444444 100644\n"
+            "--- a/other.py\n"
+            "+++ b/other.py\n"
+            "@@ -1 +1 @@\n"
+            "-y = 1\n"
+            "+y = 2\n"
+        )
+        parsed = self.parse(
+            self.GIT_HEADERS + GOOD_DIFF + second,
+            ["sample.py", "other.py"],
+        )
+
+        self.assertNotIn("diff --git", parsed["diff"])
+        self.assertNotIn("index ", parsed["diff"])
+
+    def test_hunk_content_is_never_removed(self):
+        diff = (
+            "--- a/notes.txt\n"
+            "+++ b/notes.txt\n"
+            "@@ -1,4 +1,4 @@\n"
+            " diff --git a/x b/x\n"
+            "-index 1\n"
+            "+index 2\n"
+            "\n"
+            " end\n"
+        )
+        expected = diff.replace("+index 2\n\n", "+index 2\n \n")
+
+        self.assertEqual(proposal_module._normalize_diff(diff), expected)
+
+    def test_parsed_diff_matches_fingerprinted_diff(self):
+        parsed = self.parse(self.GIT_HEADERS + GOOD_DIFF[:-1])
+        receipt = self.receipt(parsed)
+
+        self.assertEqual(
+            receipt["diff_hash"],
+            patch_applier.calculate_diff_hash(GOOD_DIFF),
+        )
+
+        result = patch_applier.verify_patch_in_temporary_worktree(
+            parsed, receipt
+        )
+        self.assertTrue(result["verified"])
+
+    def test_forbidden_git_headers_still_rejected(self):
+        forbidden = [
+            "diff --git a/new.py b/new.py\nnew file mode 100644\n"
+            "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x = 1\n",
+            "diff --git a/other.py b/other.py\ndeleted file mode 100644\n"
+            "--- a/other.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-y = 1\n",
+            "diff --git a/other.py b/moved.py\nsimilarity index 100%\n"
+            "rename from other.py\nrename to moved.py\n",
+            "diff --git a/sample.py b/sample.py\nold mode 100644\n"
+            "new mode 100755\n",
+        ]
+
+        for diff in forbidden:
+            with self.subTest(diff=diff.splitlines()[1]):
+                with self.assertRaises(ValueError):
+                    self.parse(diff, ["sample.py"])
+
+    def test_validator_itself_stays_strict(self):
+        """Only parsing tidies; validation before applying does not."""
+        for diff in (
+            self.GIT_HEADERS + GOOD_DIFF,
+            GOOD_DIFF[:-2] + "\n",
+        ):
+            with self.assertRaises(ValueError):
+                proposal_module.validate_proposal(make_proposal(diff))
+
+    def test_json_wrapped_in_markdown_and_prose(self):
+        import json
+
+        raw = (
+            "Here is the proposal:\n```json\n"
+            + json.dumps(make_proposal())
+            + "\n```\nDone."
+        )
+        self.assertEqual(
+            proposal_module.parse_proposal(raw)["diff"], GOOD_DIFF
+        )
+
+    def test_error_messages_identify_the_problem(self):
+        cases = {
+            "diff line 1 ('new file mode 100644')":
+                "new file mode 100644\n" + GOOD_DIFF,
+            "diff line 5 ('*   return 1')":
+                GOOD_DIFF.replace("-    return 1", "*   return 1"),
+            "must match the current file contents":
+                GOOD_DIFF.replace("return 1", "return 9"),
+        }
+
+        for expected, diff in cases.items():
+            with self.subTest(expected=expected):
+                with self.assertRaises(ValueError) as caught:
+                    self.parse(diff)
+
+                self.assertIn(expected, str(caught.exception))
+
+    def tearDown(self):
+        self.assert_repo_untouched()
+
+
+class ProposalRetryTests(TemporaryRepoTestCase):
+    """generate_proposal retries with the rejection reason."""
+
+    def run_with_responses(self, responses):
+        import json
+
+        prompts = []
+        queue = [
+            item if isinstance(item, str) else json.dumps(item)
+            for item in responses
+        ]
+
+        def fake_claude(prompt):
+            prompts.append(prompt)
+            return queue.pop(0)
+
+        with mock.patch.object(proposal_module, "ask_claude", fake_claude):
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    result = proposal_module.generate_proposal("Do it")
+                except ValueError as error:
+                    result = error
+
+        return result, prompts
+
+    def test_first_valid_answer_is_used(self):
+        result, prompts = self.run_with_responses([make_proposal()])
+
+        self.assertEqual(result["diff"], GOOD_DIFF)
+        self.assertEqual(len(prompts), 1)
+
+    def test_retry_includes_rejection_reason(self):
+        bad = make_proposal(GOOD_DIFF.replace("return 1", "return 9"))
+        result, prompts = self.run_with_responses(
+            ["not json", bad, make_proposal()]
+        )
+
+        self.assertEqual(result["diff"], GOOD_DIFF)
+        self.assertEqual(len(prompts), 3)
+        self.assertIn("did not return valid JSON", prompts[1])
+        self.assertIn("Git rejected the proposed patch", prompts[2])
+
+    def test_gives_up_after_attempt_limit(self):
+        limit = proposal_module.MAX_PROPOSAL_ATTEMPTS
+        result, prompts = self.run_with_responses(["not json"] * (limit + 2))
+
+        self.assertIsInstance(result, ValueError)
+        self.assertEqual(len(prompts), limit)
+
+    def test_empty_task_rejected_without_calling_claude(self):
+        with mock.patch.object(
+            proposal_module, "ask_claude", side_effect=AssertionError
+        ):
+            with self.assertRaises(ValueError):
+                proposal_module.generate_proposal("   ")
+
+    def tearDown(self):
+        self.assert_repo_untouched()
+
+
 if __name__ == "__main__":
     unittest.main()

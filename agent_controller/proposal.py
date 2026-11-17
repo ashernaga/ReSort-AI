@@ -78,7 +78,9 @@ def _check_git_patch(diff: str) -> None:
         )
 
         raise ValueError(
-            "Git rejected the proposed patch:\n" + message
+            "Git rejected the proposed patch. The context and removed "
+            "lines must match the current file contents exactly:\n"
+            + message
         )
 
 
@@ -298,6 +300,14 @@ def _validate_project_file(file_path: str) -> Path:
     return resolved
 
 
+def _describe_line(lines: list, index: int) -> str:
+    """Describe a diff line for an error message."""
+
+    text = lines[index] if index < len(lines) else ""
+
+    return f"diff line {index + 1} ({text[:80]!r})"
+
+
 def _validate_unified_diff(diff: str) -> set:
     """Accept only standard unified diffs modifying existing project files."""
 
@@ -315,16 +325,30 @@ def _validate_unified_diff(diff: str) -> set:
         # Every file section must begin with standard unified headers.
         if not lines[index].startswith("--- a/"):
             raise ValueError(
-                "Unsupported diff metadata or malformed file header."
+                "Unsupported diff metadata or malformed file header at "
+                + _describe_line(lines, index)
+                + '. Each file section must start with "--- a/<path>" '
+                'followed by "+++ b/<path>" and then "@@" hunks. '
+                "File creation, deletion, renaming, and mode changes "
+                "are not allowed."
             )
 
         old_path = lines[index][4:].split("\t", 1)[0]
 
         if index + 1 >= len(lines):
-            raise ValueError("Incomplete unified diff headers.")
+            raise ValueError(
+                'Incomplete unified diff headers: "--- a/<path>" must '
+                'be followed by "+++ b/<path>".'
+            )
 
         if not lines[index + 1].startswith("+++ b/"):
-            raise ValueError("Malformed unified diff headers.")
+            raise ValueError(
+                "Malformed unified diff headers at "
+                + _describe_line(lines, index + 1)
+                + '. Expected "+++ b/<path>" with the same path as the '
+                '"--- a/<path>" line. File creation, deletion, and '
+                "renaming are not allowed."
+            )
 
         new_path = lines[index + 1][4:].split("\t", 1)[0]
 
@@ -349,7 +373,12 @@ def _validate_unified_diff(diff: str) -> set:
 
             if not match:
                 raise ValueError(
-                    "Unsupported diff metadata or malformed hunk header."
+                    "Unsupported diff metadata or malformed hunk header "
+                    "at "
+                    + _describe_line(lines, index)
+                    + '. Expected "@@ -start,count +start,count @@". '
+                    "Check that the previous hunk's line counts are "
+                    "correct."
                 )
 
             old_expected = (
@@ -367,7 +396,10 @@ def _validate_unified_diff(diff: str) -> set:
                 or new_seen < new_expected
             ):
                 if index >= len(lines):
-                    raise ValueError("Incomplete diff hunk.")
+                    raise ValueError(
+                        "Incomplete diff hunk: the last @@ header "
+                        "declares more lines than the diff contains."
+                    )
 
                 line = lines[index]
 
@@ -381,13 +413,23 @@ def _validate_unified_diff(diff: str) -> set:
                 elif line == "\\ No newline at end of file":
                     pass
                 else:
-                    raise ValueError("Invalid unified diff hunk line.")
+                    raise ValueError(
+                        "Invalid unified diff hunk line at "
+                        + _describe_line(lines, index)
+                        + '. Every hunk line must start with a space, '
+                        '"+", or "-".'
+                    )
 
                 if (
                     old_seen > old_expected
                     or new_seen > new_expected
                 ):
-                    raise ValueError("Diff hunk line counts do not match.")
+                    raise ValueError(
+                        "Diff hunk line counts do not match the @@ "
+                        "header near "
+                        + _describe_line(lines, index)
+                        + "."
+                    )
 
                 index += 1
 
@@ -470,6 +512,87 @@ def validate_proposal(proposal: dict) -> bool:
     return True
 
 
+def _normalize_diff(diff: str) -> str:
+    """
+    Tidy harmless formatting differences in a diff returned by Claude.
+
+    This runs once, when the proposal is parsed and before it is
+    validated. The normalized diff is the one that is displayed,
+    fingerprinted, and applied, so the approved text stays exact.
+
+    Changes made:
+    - "diff --git" and "index" lines between file sections are removed.
+    - Blank lines between file sections are removed.
+    - An empty line inside a hunk becomes a blank context line (" ").
+    - A missing final newline is added.
+
+    Headers for creation, deletion, renaming, or mode changes are left
+    in place so that validation still rejects them.
+    """
+
+    import re
+
+    hunk_pattern = re.compile(
+        r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@"
+    )
+
+    lines = diff.split("\n")
+
+    # A trailing newline produces one empty final element.
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    output = []
+    old_left = 0
+    new_left = 0
+
+    for line in lines:
+        text = line[:-1] if line.endswith("\r") else line
+        ending = line[len(text):]
+
+        if old_left > 0 or new_left > 0:
+            # Inside a hunk: keep content, repairing empty context lines.
+            if text == "":
+                line = " " + ending
+                old_left -= 1
+                new_left -= 1
+            elif text.startswith(" "):
+                old_left -= 1
+                new_left -= 1
+            elif text.startswith("+"):
+                new_left -= 1
+            elif text.startswith("-"):
+                old_left -= 1
+
+            output.append(line)
+            continue
+
+        if text.startswith("\\"):
+            # "\ No newline at end of file" following a completed hunk.
+            output.append(line)
+            continue
+
+        if (
+            text == ""
+            or text.startswith("diff --git ")
+            or text.startswith("index ")
+        ):
+            continue
+
+        match = hunk_pattern.match(text)
+
+        if match:
+            old_left = int(match.group(1)) if match.group(1) else 1
+            new_left = int(match.group(2)) if match.group(2) else 1
+
+        output.append(line)
+
+    if not output:
+        return diff
+
+    return "\n".join(output) + "\n"
+
+
 def _extract_json(raw_response: str) -> str:
     """Strip Markdown fences or surrounding text around a JSON object."""
 
@@ -500,9 +623,17 @@ def parse_proposal(raw_response: str) -> dict:
             "The proposal must be plain JSON without Markdown."
         ) from error
 
+    # Tidy the diff before validation, display, and fingerprinting.
+    if isinstance(proposal, dict) and isinstance(proposal.get("diff"), str):
+        proposal["diff"] = _normalize_diff(proposal["diff"])
+
     validate_proposal(proposal)
 
     return proposal
+
+# How many times Claude may try to produce a valid proposal.
+MAX_PROPOSAL_ATTEMPTS = 3
+
 
 def generate_proposal(task: str, investigation_plan: str = "") -> dict:
     """
@@ -535,6 +666,10 @@ STRICT RULES:
 7. Provide a unified diff showing the exact proposed changes.
 8. Include every affected file in the files list.
 9. Do not include files that are not changed by the diff.
+10. Only modify existing files tracked by Git. Do not create, delete,
+    or rename files.
+11. Do not propose changes to agent_controller/, scripts/, tests/,
+    CLAUDE.md, or configuration such as .gitignore, .vscode, or .env.
 
 RETURN FORMAT:
 Return ONLY valid JSON, without Markdown fences or explanations.
@@ -547,7 +682,10 @@ Use exactly this structure:
     "diff": "Unified diff as a JSON string"
 }}
 
-The diff must use standard unified diff headers.
+The diff must use standard unified diff headers. Start each file
+section with "--- a/<path>" and "+++ b/<path>", followed by "@@" hunks.
+Do not include "diff --git" or "index" lines.
+Context lines must match the current file contents exactly.
 Do not claim that changes have been applied.
 """
 
@@ -556,7 +694,7 @@ Do not claim that changes have been applied.
     proposal = None
     last_error = None
 
-    for attempt in range(2):
+    for attempt in range(MAX_PROPOSAL_ATTEMPTS):
         raw_response = ask_claude(prompt)
 
         try:

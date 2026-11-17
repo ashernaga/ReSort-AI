@@ -1,5 +1,12 @@
+
 from openai import OpenAI
-from config import OPENAI_API_KEY, OPENAI_MODEL
+
+# Support both direct execution and package imports.
+if __package__:
+    from .config import OPENAI_API_KEY, OPENAI_MODEL
+else:
+    from config import OPENAI_API_KEY, OPENAI_MODEL
+
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 

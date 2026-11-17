@@ -1,7 +1,15 @@
 
-from openai_agent import ask_gpt
-from proposal import generate_proposal
-from approval import request_approval
+# Support both direct execution and package imports.
+if __package__:
+    from .openai_agent import ask_gpt
+    from .proposal import generate_proposal
+    from .approval import request_approval
+    from .patch_applier import validate_patch_application
+else:
+    from openai_agent import ask_gpt
+    from proposal import generate_proposal
+    from approval import request_approval
+    from patch_applier import validate_patch_application
 
 
 def main():
@@ -16,8 +24,8 @@ def main():
         return
 
     try:
-        # STEP 1: GPT creates an investigation plan
-        print("\n[1/3] GPT is preparing an investigation plan...\n")
+        # STEP 1: GPT creates an investigation plan.
+        print("\n[1/4] GPT is preparing an investigation plan...\n")
 
         planning_prompt = f"""
 You are the planning agent for the Trash ML Python project.
@@ -38,8 +46,8 @@ Do not modify any files.
         print("-" * 60)
         print(gpt_plan)
 
-        # STEP 2: Claude generates a proposed change
-        print("\n[2/3] Claude is generating a proposal...\n")
+        # STEP 2: Claude generates a proposed change.
+        print("\n[2/4] Claude is generating a proposal...\n")
 
         proposal = generate_proposal(
             task=task,
@@ -48,18 +56,30 @@ Do not modify any files.
 
         print("\nClaude proposal generated and validated.")
 
-        # STEP 3: User reviews and decides
-        print("\n[3/3] Waiting for human approval...\n")
+        # STEP 3: User reviews and decides.
+        print("\n[3/4] Waiting for human approval...\n")
 
-        approved = request_approval(proposal)
+        receipt = request_approval(proposal)
 
-        if approved:
-            print("\nPROPOSAL AUTHORIZED.")
-            print("No files have been modified.")
-            print("Patch application is not implemented yet.")
-        else:
+        if receipt is None or receipt.get("approved") is not True:
             print("\nPROPOSAL REJECTED.")
             print("No files have been modified.")
+            return
+
+        print("\nPROPOSAL APPROVED.")
+        print("Approval receipt received.")
+
+        # STEP 4: Validate the exact approved patch.
+        print("\n[4/4] Performing final dry-run validation...\n")
+
+        validate_patch_application(proposal, receipt)
+
+        print("\nDRY-RUN VALIDATION PASSED.")
+        print("Approval receipt verified.")
+        print("Git baseline verified.")
+        print("Patch structure and file paths verified.")
+        print("Git accepted the patch check.")
+        print("\nNo files have been modified.")
 
         print("\n" + "=" * 60)
         print("WORKFLOW COMPLETED")

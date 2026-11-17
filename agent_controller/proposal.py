@@ -81,14 +81,25 @@ def _check_git_patch(diff: str) -> None:
 
 
 
+
 def _validate_project_file(file_path: str) -> Path:
-    """Validate that a path identifies an existing, regular project file."""
+    """Validate that a path identifies a safe, tracked project file."""
+
+    import re
 
     if not isinstance(file_path, str) or not file_path.strip():
         raise ValueError("Invalid file path.")
 
     if "\\" in file_path:
-        raise ValueError(f"Use forward slashes in file paths: {file_path}")
+        raise ValueError(
+            f"Use forward slashes in file paths: {file_path}"
+        )
+
+    # Reject ambiguous or unsafe path components.
+    parts = file_path.split("/")
+
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"Unsafe file path: {file_path}")
 
     path = Path(file_path)
     windows_path = PureWindowsPath(file_path)
@@ -97,9 +108,44 @@ def _validate_project_file(file_path: str) -> Path:
         path.is_absolute()
         or windows_path.is_absolute()
         or windows_path.drive
-        or ".." in path.parts
     ):
-        raise ValueError(f"Unsafe file path: {file_path}")
+        raise ValueError(f"Absolute paths are not allowed: {file_path}")
+
+    # Protect Git metadata and repository configuration.
+    protected_names = {
+        ".git",
+        ".gitmodules",
+        ".gitignore",
+    }
+
+    for part in parts:
+        if part.casefold() in protected_names:
+            raise ValueError(
+                f"Protected project path: {file_path}"
+            )
+
+    # Reject Windows-invalid names and alternate data streams.
+    reserved_names = {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+
+    for part in parts:
+        if (
+            any(ord(char) < 32 or char in '<>:"|?*' for char in part)
+            or part.endswith((" ", "."))
+        ):
+            raise ValueError(
+                f"Unsafe Windows path component: {part}"
+            )
+
+        device_name = part.split(".", 1)[0].upper()
+
+        if device_name in reserved_names:
+            raise ValueError(
+                f"Reserved Windows device name: {part}"
+            )
 
     root = PROJECT_ROOT.resolve()
     candidate = root / path
@@ -108,7 +154,7 @@ def _validate_project_file(file_path: str) -> Path:
         # Reject symbolic links in every path component.
         current = root
 
-        for part in path.parts:
+        for part in parts:
             current = current / part
 
             if current.is_symlink():
@@ -133,12 +179,13 @@ def _validate_project_file(file_path: str) -> Path:
             f"Could not validate file path: {file_path}"
         ) from error
 
-    # Confirm that Git already tracks this file.
+    # Confirm Git tracks the file and that it is not a submodule.
     try:
         result = subprocess.run(
             [
                 "git",
                 "ls-files",
+                "--stage",
                 "--error-unmatch",
                 "--",
                 file_path,
@@ -151,15 +198,24 @@ def _validate_project_file(file_path: str) -> Path:
             timeout=10,
             check=False,
         )
-    except subprocess.TimeoutExpired as error:
-        raise ValueError(
-            f"Git tracking check timed out: {file_path}"
+
+    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(
+            f"Could not verify Git tracking: {file_path}"
         ) from error
 
-    if result.returncode != 0:
+    if result.returncode != 0 or not result.stdout.strip():
         raise ValueError(
             f"File is not tracked by Git: {file_path}"
         )
+
+    for line in result.stdout.splitlines():
+        match = re.match(r"^([0-7]{6}) ", line)
+
+        if match and match.group(1) == "160000":
+            raise ValueError(
+                f"Git submodules cannot be modified: {file_path}"
+            )
 
     return resolved
 

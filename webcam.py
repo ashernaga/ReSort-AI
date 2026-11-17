@@ -18,6 +18,9 @@ CLASS_NAMES = [
 
 IMG_SIZE = (224, 224)
 
+# Size of the bounding box as a fraction of the shorter frame side
+BOX_FRACTION = 0.5
+
 
 # =========================
 # LOAD MODEL
@@ -55,7 +58,16 @@ while True:
     # Prepare image
     # -------------------------
 
-    image = cv2.resize(frame, IMG_SIZE)
+    height, width = frame.shape[:2]
+    side = int(min(height, width) * BOX_FRACTION)
+    x1 = (width - side) // 2
+    y1 = (height - side) // 2
+    x2 = x1 + side
+    y2 = y1 + side
+
+    # Classify only the region inside the box, not the whole frame
+    roi = frame[y1:y2, x1:x2]
+    image = cv2.resize(roi, IMG_SIZE)
 
     image = cv2.cvtColor(
         image,
@@ -97,6 +109,8 @@ while True:
         (0, 255, 0),
         2
     )
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
     cv2.imshow(
         "Garbage Classifier",

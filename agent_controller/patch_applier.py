@@ -17,15 +17,19 @@ def _run_git(
 ) -> subprocess.CompletedProcess:
     """Run Git safely without invoking a shell."""
 
+    # Send input as raw UTF-8 bytes. A text-mode pipe on Windows would
+    # rewrite every LF as CRLF, so Git would receive a different patch
+    # from the one that was approved and fingerprinted.
+    input_bytes = (
+        input_text.encode("utf-8") if input_text is not None else None
+    )
+
     try:
-        return subprocess.run(
+        result = subprocess.run(
             ["git", *args],
             cwd=str(cwd),
-            input=input_text,
+            input=input_bytes,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -33,6 +37,13 @@ def _run_git(
         raise RuntimeError(
             "Git command failed or timed out."
         ) from error
+
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        result.stdout.decode("utf-8", errors="replace"),
+        result.stderr.decode("utf-8", errors="replace"),
+    )
 
 
 def _is_registered_worktree(worktree_path: Path) -> bool:

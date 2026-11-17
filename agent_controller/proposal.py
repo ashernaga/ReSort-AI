@@ -51,13 +51,12 @@ def _check_git_patch(diff: str) -> None:
     """Check whether Git accepts a patch without applying it."""
 
     try:
+        # Send the diff as raw UTF-8 bytes. A text-mode pipe on Windows
+        # would rewrite every LF as CRLF and change the patch.
         result = subprocess.run(
             ["git", "apply", "--check", "--"],
             cwd=str(PROJECT_ROOT),
-            input=diff,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            input=diff.encode("utf-8"),
             capture_output=True,
             timeout=30,
             check=False,
@@ -72,7 +71,10 @@ def _check_git_patch(diff: str) -> None:
         ) from error
 
     if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip()
+        message = (
+            result.stderr.decode("utf-8", errors="replace").strip()
+            or result.stdout.decode("utf-8", errors="replace").strip()
+        )
 
         raise ValueError(
             "Git rejected the proposed patch:\n" + message

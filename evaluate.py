@@ -106,6 +106,28 @@ report = classification_report(
 
 print(report)
 
+metal_index = CLASS_NAMES.index("metal")
+file_paths = test_dataset.file_paths
+wrong_as_metal = [
+    file_paths[i]
+    for i in range(len(y_true))
+    if y_pred[i] == metal_index and y_true[i] != metal_index
+]
+missed_metal = [
+    (file_paths[i], CLASS_NAMES[y_pred[i]])
+    for i in range(len(y_true))
+    if y_true[i] == metal_index and y_pred[i] != metal_index
+]
+print("\n--------------------------------")
+print("Metal error analysis")
+print("--------------------------------")
+print(f"False positives (predicted metal, not metal): {len(wrong_as_metal)}")
+for path in wrong_as_metal:
+    print(f"  {path}")
+print(f"False negatives (metal predicted as other): {len(missed_metal)}")
+for path, predicted in missed_metal:
+    print(f"  {path} -> {predicted}")
+
 
 # =========================
 # CONFUSION MATRIX

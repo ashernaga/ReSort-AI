@@ -1,3 +1,4 @@
+import argparse
 import cv2
 import numpy as np
 import tensorflow as tf
@@ -7,7 +8,9 @@ import tensorflow as tf
 # SETTINGS
 # =========================
 
-MODEL_PATH = "models/garbage_mobilenetv2.keras"
+parser = argparse.ArgumentParser(description="Live webcam garbage classifier.")
+parser.add_argument("--model-path", default="models/garbage_mobilenetv2.keras", help="Path to the trained Keras model file.")
+args = parser.parse_args()
 
 CLASS_NAMES = [
     "general_waste",
@@ -37,7 +40,7 @@ BOX_PADDING = 0.15
 
 print("Loading model...")
 
-model = tf.keras.models.load_model(MODEL_PATH)
+model = tf.keras.models.load_model(args.model_path)
 
 print("Model loaded!")
 print("Starting webcam...")

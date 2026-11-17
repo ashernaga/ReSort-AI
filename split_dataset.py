@@ -5,6 +5,11 @@ import random
 SOURCE_DIR = Path("dataset_4class")
 OUTPUT_DIR = Path("dataset_split")
 
+# Extra images (see prepare_dataset.py) go to train/validation only.
+# The original dataset_split/test folder is the shared, untouched test set.
+EXTRA_DIR = Path("dataset/extra")
+V2_DIR = Path("dataset_split/v2")
+
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -18,6 +23,48 @@ IMAGE_EXTENSIONS = {
 }
 
 random.seed(42)
+
+
+def build_v2_split():
+    """Build dataset_split/v2 = old train/validation + new extra images.
+
+    dataset_split/train, validation and test are never modified here.
+    """
+    if not EXTRA_DIR.exists():
+        print("\nNo dataset/extra folder found; skipping v2 split.")
+        return
+
+    classes = ["general_waste", "glass", "metal", "plastic"]
+    rng = random.Random(42)
+    train_share = TRAIN_RATIO / (TRAIN_RATIO + VAL_RATIO)
+
+    for split in ["train", "validation"]:
+        for class_name in classes:
+            target = V2_DIR / split / class_name
+            target.mkdir(parents=True, exist_ok=True)
+            for image in (OUTPUT_DIR / split / class_name).iterdir():
+                if image.is_file() and not (target / image.name).exists():
+                    shutil.copy2(image, target / image.name)
+
+    for class_name in classes:
+        folder = EXTRA_DIR / class_name
+        if not folder.exists():
+            continue
+        images = sorted(
+            f for f in folder.iterdir()
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+        )
+        rng.shuffle(images)
+        train_end = int(len(images) * train_share)
+        for split, subset in (
+            ("train", images[:train_end]),
+            ("validation", images[train_end:]),
+        ):
+            for image in subset:
+                shutil.copy2(image, V2_DIR / split / class_name / image.name)
+        print(f"v2 {class_name}: +{len(images)} extra images")
+
+    print(f"v2 dataset written to {V2_DIR} (test set: {OUTPUT_DIR / 'test'})")
 
 
 def main():
@@ -85,6 +132,8 @@ def main():
     print("\n--------------------------------")
     print("Dataset split completed!")
     print("--------------------------------")
+
+    build_v2_split()
 
 
 if __name__ == "__main__":

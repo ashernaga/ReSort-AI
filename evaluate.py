@@ -1,4 +1,6 @@
+import argparse
 import csv
+import json
 from pathlib import Path
 
 import cv2
@@ -11,8 +13,19 @@ import numpy as np
 # SETTINGS
 # =========================
 
-TEST_DIR = Path("dataset_split/test")
-MODEL_PATH = Path("models/garbage_mobilenetv2.keras")
+parser = argparse.ArgumentParser(description="Evaluate a waste classifier.")
+parser.add_argument(
+    "--test-dir", default="dataset_split/test",
+    help="held-out test folder; use the same one for every model compared"
+)
+parser.add_argument(
+    "--model-path", default="models/garbage_mobilenetv2.keras",
+    help="model file to evaluate"
+)
+args = parser.parse_args()
+
+TEST_DIR = Path(args.test_dir)
+MODEL_PATH = Path(args.model_path)
 
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 32
@@ -110,6 +123,20 @@ report = classification_report(
 
 print(report)
 
+# Save metrics next to the model so two models can be compared side by side
+metrics_path = MODEL_PATH.with_name(f"{MODEL_PATH.stem}_metrics.json")
+metrics = {
+    "model": str(MODEL_PATH),
+    "test_dir": str(TEST_DIR),
+    "test_loss": float(test_loss),
+    "test_accuracy": float(test_accuracy),
+    "report": classification_report(
+        y_true, y_pred, target_names=CLASS_NAMES, output_dict=True
+    ),
+}
+metrics_path.write_text(json.dumps(metrics, indent=2))
+print(f"Metrics saved to: {metrics_path}")
+
 metal_index = CLASS_NAMES.index("metal")
 file_paths = test_dataset.file_paths
 wrong_as_metal = [
@@ -136,8 +163,10 @@ for path, predicted in missed_metal:
 # ERROR REPORT (ALL CLASSES)
 # =========================
 
-ERROR_REPORT_PATH = Path("models/error_report.csv")
-ERROR_SHEET_PATH = Path("models/error_sheet.jpg")
+# The original model keeps its original output names
+_suffix = "" if MODEL_PATH.stem == "garbage_mobilenetv2" else f"_{MODEL_PATH.stem}"
+ERROR_REPORT_PATH = Path(f"models/error_report{_suffix}.csv")
+ERROR_SHEET_PATH = Path(f"models/error_sheet{_suffix}.jpg")
 SHEET_COLUMNS = 6
 SHEET_MAX_IMAGES = 30
 

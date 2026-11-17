@@ -1,3 +1,5 @@
+import argparse
+import json
 from pathlib import Path
 
 import tensorflow as tf
@@ -11,7 +13,29 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 # SETTINGS
 # =========================
 
-DATASET_DIR = Path("dataset_split")
+parser = argparse.ArgumentParser(description="Train the waste classifier.")
+parser.add_argument(
+    "--data-dir", default="dataset_split",
+    help="folder with train/ and validation/ (e.g. dataset_split/v2)"
+)
+parser.add_argument(
+    "--model-path", default="models/garbage_mobilenetv2.keras",
+    help="where to save the trained model"
+)
+parser.add_argument(
+    "--overwrite", action="store_true",
+    help="allow replacing an existing model file"
+)
+args = parser.parse_args()
+
+DATASET_DIR = Path(args.data_dir)
+MODEL_OUT_PATH = Path(args.model_path)
+
+if MODEL_OUT_PATH.exists() and not args.overwrite:
+    raise SystemExit(
+        f"{MODEL_OUT_PATH} already exists. Choose another --model-path "
+        "or pass --overwrite."
+    )
 
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 32
@@ -181,12 +205,20 @@ history = model.fit(
 # SAVE MODEL
 # =========================
 
-MODEL_DIR = Path("models")
-MODEL_DIR.mkdir(exist_ok=True)
-
-model_path = MODEL_DIR / "garbage_mobilenetv2.keras"
+model_path = MODEL_OUT_PATH
+model_path.parent.mkdir(parents=True, exist_ok=True)
 
 model.save(model_path)
+
+# Record how this model was trained, so models can be compared later
+run_info = {
+    "data_dir": str(DATASET_DIR),
+    "epochs_run": len(history.history["loss"]),
+    "best_val_accuracy": max(history.history["val_accuracy"]),
+    "img_size": list(IMG_SIZE),
+    "classes": CLASS_NAMES,
+}
+model_path.with_suffix(".json").write_text(json.dumps(run_info, indent=2))
 
 print("\n--------------------------------")
 print("Training completed!")

@@ -21,6 +21,7 @@ from unittest import mock
 from agent_controller import approval
 from agent_controller import patch_applier
 from agent_controller import proposal as proposal_module
+from agent_controller import receipts
 
 
 GOOD_DIFF = (
@@ -104,6 +105,7 @@ class TemporaryRepoTestCase(unittest.TestCase):
         (self.repo / name).write_bytes(data)
 
     def receipt(self, proposal, **overrides):
+        """Build a receipt as the approval step would, then sign it."""
         receipt = {
             "approved": True,
             "diff_hash": patch_applier.calculate_diff_hash(
@@ -112,7 +114,7 @@ class TemporaryRepoTestCase(unittest.TestCase):
             "baseline_commit": self.base_commit,
         }
         receipt.update(overrides)
-        return receipt
+        return receipts.sign_receipt(receipt)
 
     def worktree_count(self):
         output = self.git("worktree", "list", "--porcelain")
@@ -245,6 +247,72 @@ class ReceiptTests(TemporaryRepoTestCase):
             with self.subTest(receipt=receipt):
                 with self.assertRaises(ValueError):
                     self.verify(proposal, receipt)
+
+    def tearDown(self):
+        self.assert_repo_untouched()
+
+
+class SignedReceiptTests(TemporaryRepoTestCase):
+    """Receipts must come from the approval step and be used once."""
+
+    def test_unsigned_receipt_rejected(self):
+        proposal = make_proposal()
+        unsigned = {
+            "approved": True,
+            "diff_hash": patch_applier.calculate_diff_hash(GOOD_DIFF),
+            "baseline_commit": self.base_commit,
+        }
+
+        for stage in (
+            patch_applier.validate_patch_application,
+            patch_applier.verify_patch_in_temporary_worktree,
+            patch_applier.apply_approved_patch,
+        ):
+            with self.subTest(stage=stage.__name__):
+                with self.assertRaises(ValueError) as caught:
+                    stage(proposal, unsigned)
+
+                self.assertIn("not signed", str(caught.exception))
+
+    def test_forged_signature_rejected(self):
+        proposal = make_proposal()
+        forged = {**self.receipt(proposal), "signature": "0" * 64}
+
+        with self.assertRaises(ValueError):
+            patch_applier.apply_approved_patch(proposal, forged)
+
+    def test_receipt_edited_after_signing_rejected(self):
+        proposal = make_proposal()
+        other = make_proposal(GOOD_DIFF.replace("return 2", "return 3"))
+        edited = {
+            **self.receipt(proposal),
+            "diff_hash": patch_applier.calculate_diff_hash(other["diff"]),
+        }
+
+        with self.assertRaises(ValueError):
+            patch_applier.apply_approved_patch(other, edited)
+
+    def test_receipt_from_another_session_rejected(self):
+        proposal = make_proposal()
+        receipt = self.receipt(proposal)
+
+        with mock.patch.object(receipts, "_SESSION_KEY", b"x" * 32):
+            with self.assertRaises(ValueError):
+                patch_applier.apply_approved_patch(proposal, receipt)
+
+    def test_receipt_cannot_be_used_twice(self):
+        receipt = self.receipt(make_proposal())
+
+        receipts.consume_receipt(receipt)
+
+        with self.assertRaises(ValueError) as caught:
+            receipts.consume_receipt(receipt)
+
+        self.assertIn("already been used", str(caught.exception))
+
+    def test_non_dict_has_no_valid_signature(self):
+        for value in (None, "sig", [], 5):
+            self.assertFalse(receipts.verify_signature(value))
 
     def tearDown(self):
         self.assert_repo_untouched()
@@ -559,6 +627,229 @@ class DirtyWorkingTreeTests(TemporaryRepoTestCase):
         self.assert_rejected()
 
 
+class ApplyApprovedPatchTests(TemporaryRepoTestCase):
+    """Real application: exact result, verification, and rollback."""
+
+    def apply(self, proposal=None):
+        proposal = proposal or make_proposal()
+
+        return patch_applier.apply_approved_patch(
+            proposal, self.receipt(proposal)
+        )
+
+    def read(self, name):
+        return (self.repo / name).read_bytes().replace(b"\r\n", b"\n")
+
+    def test_applies_exact_diff_and_leaves_it_uncommitted(self):
+        result = self.apply()
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["changed_files"], ["sample.py"])
+        self.assertEqual(
+            self.read("sample.py"), b"def f():\n    return 2\n\n"
+        )
+        self.assertEqual(self.read("other.py"), b"y = 1\n")
+        self.assertEqual(
+            self.git("rev-parse", "HEAD").strip(), self.base_commit
+        )
+        self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
+        self.assertEqual(
+            self.git("diff", "--name-only").strip(), "sample.py"
+        )
+        self.assertEqual(self.worktree_count(), 1)
+        self.assertEqual(
+            result["undo_command"], 'git restore -- "sample.py"'
+        )
+
+    def test_result_matches_the_sandbox_hashes(self):
+        proposal = make_proposal()
+        receipt = self.receipt(proposal)
+        sandbox = patch_applier.verify_patch_in_temporary_worktree(
+            proposal, receipt
+        )
+        result = patch_applier.apply_approved_patch(proposal, receipt)
+
+        self.assertEqual(result["file_hashes"], sandbox["file_hashes"])
+        self.assertEqual(
+            patch_applier._hash_file(self.repo, "sample.py"),
+            sandbox["file_hashes"]["sample.py"],
+        )
+
+    def test_receipt_is_spent_after_application(self):
+        proposal = make_proposal()
+        receipt = self.receipt(proposal)
+
+        patch_applier.apply_approved_patch(proposal, receipt)
+        self.git("restore", "--", "sample.py")
+
+        with self.assertRaises(ValueError) as caught:
+            patch_applier.apply_approved_patch(proposal, receipt)
+
+        self.assertIn("already been used", str(caught.exception))
+        self.assertIn(b"return 1", self.read("sample.py"))
+
+    def test_rejected_before_any_change(self):
+        """Every pre-application failure leaves the project untouched."""
+        proposal = make_proposal()
+        good = self.receipt(proposal)
+        cases = {
+            "not approved": self.receipt(proposal, approved=False),
+            "wrong hash": self.receipt(proposal, diff_hash="0" * 64),
+            "wrong baseline": self.receipt(
+                proposal, baseline_commit="f" * 40
+            ),
+            "unsigned": {
+                k: v for k, v in good.items() if k != "signature"
+            },
+        }
+
+        for name, receipt in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(ValueError):
+                    patch_applier.apply_approved_patch(proposal, receipt)
+
+                self.assert_repo_untouched()
+
+    def test_dirty_tree_blocks_application(self):
+        (self.repo / "stray.txt").write_bytes(b"x")
+
+        with self.assertRaises(ValueError):
+            self.apply()
+
+        self.assertIn(b"return 1", self.read("sample.py"))
+
+    def test_wrong_result_is_rolled_back(self):
+        """If the result differs from the sandbox, the patch is undone."""
+        real_verify = patch_applier._verify_applied_result
+
+        def tampered(baseline, files, hashes):
+            return real_verify(
+                baseline, files, {name: "0" * 40 for name in files}
+            )
+
+        with mock.patch.object(
+            patch_applier, "_verify_applied_result", tampered
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.apply()
+
+        self.assertIn("failed verification", str(caught.exception))
+        self.assertIn("rolled back", str(caught.exception))
+        self.assert_repo_untouched()
+
+    def test_rollback_keeps_unrelated_edits(self):
+        """Reverse-applying only undoes the patch, not other changes."""
+        proposal = make_proposal()
+        real_verify = patch_applier._verify_applied_result
+
+        def tampered(baseline, files, hashes):
+            # Someone edits another file while the patch is applied.
+            self.write("other.py", "y = 99\n")
+
+            raise RuntimeError("simulated verification failure")
+
+        with mock.patch.object(
+            patch_applier, "_verify_applied_result", tampered
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.apply(proposal)
+
+        self.assertIn(b"return 1", self.read("sample.py"))
+        self.assertEqual(self.read("other.py"), b"y = 99\n")
+        self.assertIn("rolled back", str(caught.exception))
+        self.assertIn("were not made by this patch", str(caught.exception))
+
+    def test_failed_rollback_reports_manual_command(self):
+        proposal = make_proposal()
+
+        def tampered(baseline, files, hashes):
+            # Someone changes the patched file, so it cannot be reversed.
+            self.write("sample.py", "def f():\n    return 42\n\n")
+
+            raise RuntimeError("simulated verification failure")
+
+        with mock.patch.object(
+            patch_applier, "_verify_applied_result", tampered
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.apply(proposal)
+
+        self.assertIn("ROLLBACK FAILED", str(caught.exception))
+        self.assertIn('git restore -- "sample.py"', str(caught.exception))
+        self.assertIn(b"return 42", self.read("sample.py"))
+
+    def test_failed_apply_changes_nothing(self):
+        real_run_git = patch_applier._run_git
+
+        def failing(args, cwd, input_text=None, timeout=30):
+            if (
+                args[:2] == ["apply", "--"]
+                and cwd == patch_applier.PROJECT_ROOT
+            ):
+                return subprocess.CompletedProcess(
+                    args, 1, "", "simulated failure"
+                )
+
+            return real_run_git(args, cwd, input_text, timeout)
+
+        with mock.patch.object(patch_applier, "_run_git", failing):
+            with self.assertRaises(RuntimeError) as caught:
+                self.apply()
+
+        self.assertIn("Nothing was changed", str(caught.exception))
+        self.assert_repo_untouched()
+
+    def test_extra_file_change_is_detected(self):
+        """A change outside the approved list fails verification."""
+        proposal = make_proposal()
+        real_apply = patch_applier._run_git
+
+        def sneaky(args, cwd, input_text=None, timeout=30):
+            result = real_apply(args, cwd, input_text, timeout)
+
+            if (
+                args[:2] == ["apply", "--"]
+                and cwd == patch_applier.PROJECT_ROOT
+                and result.returncode == 0
+            ):
+                self.write("other.py", "y = 2\n")
+
+            return result
+
+        with mock.patch.object(patch_applier, "_run_git", sneaky):
+            with self.assertRaises(RuntimeError) as caught:
+                self.apply(proposal)
+
+        self.assertIn("failed verification", str(caught.exception))
+        self.assertIn("differ from the approved list", str(caught.exception))
+
+    def test_new_file_is_detected(self):
+        real_run_git = patch_applier._run_git
+
+        def sneaky(args, cwd, input_text=None, timeout=30):
+            result = real_run_git(args, cwd, input_text, timeout)
+
+            if (
+                args[:2] == ["apply", "--"]
+                and cwd == patch_applier.PROJECT_ROOT
+                and result.returncode == 0
+            ):
+                (self.repo / "created.txt").write_bytes(b"x")
+
+            return result
+
+        with mock.patch.object(patch_applier, "_run_git", sneaky):
+            with self.assertRaises(RuntimeError) as caught:
+                self.apply()
+
+        self.assertIn("unexpected new files", str(caught.exception))
+        self.assertIn(b"return 1", self.read("sample.py"))
+
+
+class ApplyApprovedPatchCrlfTests(ApplyApprovedPatchTests):
+    line_ending = "\r\n"
+
+
 class WorktreeCleanupTests(TemporaryRepoTestCase):
 
     def test_cleanup_after_failure_inside_worktree(self):
@@ -597,8 +888,9 @@ class ApprovalPromptTests(TemporaryRepoTestCase):
     def test_exact_approve_creates_receipt(self):
         receipt = self.ask("APPROVE")
 
+        self.assertTrue(receipts.verify_signature(receipt))
         self.assertEqual(
-            receipt,
+            {k: v for k, v in receipt.items() if k != "signature"},
             {
                 "approved": True,
                 "diff_hash": patch_applier.calculate_diff_hash(GOOD_DIFF),

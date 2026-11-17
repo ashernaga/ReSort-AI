@@ -5,6 +5,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+if __package__:
+    from .receipts import consume_receipt, verify_signature
+else:
+    from receipts import consume_receipt, verify_signature
+
 # Project root: parent of agent_controller
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -79,6 +84,24 @@ def _is_registered_worktree(worktree_path: Path) -> bool:
     return False
 
 
+def _hash_file(cwd: Path, file_path: str) -> str:
+    """
+    Return Git's content hash of a working-tree file.
+
+    Git applies its normal line-ending conversion, so the same content
+    gives the same hash in the temporary worktree and the real project.
+    """
+
+    result = _run_git(["hash-object", "--", file_path], cwd, timeout=10)
+
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(
+            f"Could not fingerprint file contents: {file_path}"
+        )
+
+    return result.stdout.strip()
+
+
 def get_current_commit() -> str:
     """Return the current Git commit hash."""
 
@@ -150,6 +173,12 @@ def verify_approval_receipt(proposal: dict, receipt: dict) -> bool:
 
     if not isinstance(receipt, dict):
         raise ValueError("Invalid approval receipt.")
+
+    if not verify_signature(receipt):
+        raise ValueError(
+            "Approval receipt is not signed by this approval session. "
+            "It may be forged, edited, or from an earlier run."
+        )
 
     if receipt.get("approved") is not True:
         raise ValueError("Proposal has not been approved.")
@@ -458,11 +487,19 @@ def verify_patch_in_temporary_worktree(
                     "during verification."
                 )
 
+            # Record the resulting content of every changed file, so a
+            # later real application can be compared with this result.
+            file_hashes = {
+                file_path: _hash_file(worktree_path, file_path)
+                for file_path in sorted(actual_files)
+            }
+
             return {
                 "verified": True,
                 "baseline_commit": baseline_commit,
                 "changed_files": sorted(actual_files),
                 "diff_hash": approved_hash,
+                "file_hashes": file_hashes,
             }
 
         finally:
@@ -484,3 +521,222 @@ def verify_patch_in_temporary_worktree(
                         "Could not clean up temporary Git worktree:\n"
                         + remove_result.stderr.strip()
                     )
+
+
+def _parse_name_status(output: str) -> dict:
+    """Parse `git diff --name-status --no-renames -z` into {path: type}."""
+
+    records = [record for record in output.split("\0") if record]
+
+    if len(records) % 2 != 0:
+        raise RuntimeError("Unexpected Git change-list format.")
+
+    return {
+        records[index + 1]: records[index]
+        for index in range(0, len(records), 2)
+    }
+
+
+def _verify_applied_result(
+    baseline_commit: str,
+    expected_files: set,
+    expected_hashes: dict,
+) -> None:
+    """
+    Check the real project after a patch was applied.
+
+    Raises if anything differs from what was approved and verified.
+    """
+
+    if get_current_commit() != baseline_commit:
+        raise RuntimeError("Git commit changed during application.")
+
+    staged = _run_git(["diff", "--cached", "--quiet"], PROJECT_ROOT)
+
+    if staged.returncode == 1:
+        raise RuntimeError("Unexpected staged changes after application.")
+
+    if staged.returncode != 0:
+        raise RuntimeError("Could not check staged changes.")
+
+    untracked = _run_git(
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        PROJECT_ROOT,
+    )
+
+    if untracked.returncode != 0:
+        raise RuntimeError("Could not check for new files.")
+
+    if untracked.stdout:
+        raise RuntimeError("Application created unexpected new files.")
+
+    changes = _run_git(
+        ["diff", "--name-status", "--no-renames", "-z"],
+        PROJECT_ROOT,
+    )
+
+    if changes.returncode != 0:
+        raise RuntimeError("Could not list changed files.")
+
+    changed = _parse_name_status(changes.stdout)
+
+    if any(kind != "M" for kind in changed.values()):
+        raise RuntimeError(
+            "Application made a change other than modifying a file."
+        )
+
+    if set(changed) != set(expected_files):
+        raise RuntimeError(
+            "Changed files differ from the approved list. "
+            f"Expected: {sorted(expected_files)}; "
+            f"actual: {sorted(changed)}"
+        )
+
+    for file_path in sorted(expected_files):
+        if _hash_file(PROJECT_ROOT, file_path) != expected_hashes[file_path]:
+            raise RuntimeError(
+                "File contents differ from the verified result: "
+                + file_path
+            )
+
+
+def _undo_command(files: list) -> str:
+    quoted = " ".join(f'"{name}"' for name in files)
+
+    return f"git restore -- {quoted}"
+
+
+def _rollback_patch(diff: str, files: list) -> str:
+    """
+    Undo an applied patch by reverse-applying the exact approved diff.
+
+    Only the patch's own changes are reversed, so unrelated edits are
+    never discarded. Returns a message describing the outcome.
+    """
+
+    check = _run_git(
+        ["apply", "-R", "--check", "--"], PROJECT_ROOT, input_text=diff
+    )
+
+    if check.returncode == 0:
+        undone = _run_git(
+            ["apply", "-R", "--"], PROJECT_ROOT, input_text=diff
+        )
+
+        if undone.returncode == 0:
+            try:
+                ensure_clean_working_tree()
+                return "The patch was rolled back. Your files are unchanged."
+            except (ValueError, RuntimeError):
+                return (
+                    "The patch was rolled back. Other changes in your "
+                    "working tree were not made by this patch and were "
+                    "left untouched; inspect them with 'git status'."
+                )
+
+    return (
+        "AUTOMATIC ROLLBACK FAILED. Your files were left as they are. "
+        "Inspect them with 'git diff'. If you want to discard the "
+        "patch's changes, run: " + _undo_command(files)
+    )
+
+
+def apply_approved_patch(proposal: dict, receipt: dict) -> dict:
+    """
+    Apply an approved proposal to the real project.
+
+    Order of operations:
+    1. Verify the exact patch in a temporary worktree.
+    2. Re-check the receipt, baseline, working tree, paths, and diff.
+    3. Spend the single-use receipt.
+    4. Apply the exact approved diff.
+    5. Verify the result against what the temporary worktree produced.
+    6. Reverse the patch if the result is not exactly as verified.
+
+    The change is left uncommitted. Nothing is staged.
+    """
+
+    if __package__:
+        from .proposal import validate_proposal
+    else:
+        from proposal import validate_proposal
+
+    # Sandbox verification also checks the receipt and the working tree.
+    verification = verify_patch_in_temporary_worktree(proposal, receipt)
+
+    baseline_commit = receipt["baseline_commit"]
+    approved_diff = proposal["diff"]
+    files = sorted(proposal["files"])
+
+    # Final re-validation immediately before touching the project.
+    verify_approval_receipt(proposal, receipt)
+    validate_proposal(proposal)
+
+    if calculate_diff_hash(approved_diff) != receipt["diff_hash"]:
+        raise ValueError("Proposal diff changed before application.")
+
+    if (
+        verification["baseline_commit"] != baseline_commit
+        or verification["diff_hash"] != receipt["diff_hash"]
+        or verification["changed_files"] != files
+    ):
+        raise RuntimeError(
+            "Verification result does not match the approved proposal."
+        )
+
+    ensure_clean_working_tree()
+
+    # From here the approval is spent, whatever happens next.
+    consume_receipt(receipt)
+
+    check = _run_git(
+        ["apply", "--check", "--"], PROJECT_ROOT, input_text=approved_diff
+    )
+
+    if check.returncode != 0:
+        raise ValueError(
+            "Approved patch no longer applies. Nothing was changed:\n"
+            + check.stderr.strip()
+        )
+
+    applied = _run_git(
+        ["apply", "--"], PROJECT_ROOT, input_text=approved_diff
+    )
+
+    if applied.returncode != 0:
+        # git apply is all-or-nothing, but confirm nothing changed.
+        try:
+            ensure_clean_working_tree()
+            state = "Nothing was changed."
+        except (ValueError, RuntimeError):
+            state = (
+                "The working tree is not clean; inspect it with "
+                "'git diff'."
+            )
+
+        raise RuntimeError(
+            "Patch application failed. "
+            + state
+            + "\n"
+            + applied.stderr.strip()
+        )
+
+    try:
+        _verify_applied_result(
+            baseline_commit, set(files), verification["file_hashes"]
+        )
+    except (ValueError, RuntimeError) as error:
+        outcome = _rollback_patch(approved_diff, files)
+
+        raise RuntimeError(
+            f"Applied patch failed verification: {error}\n{outcome}"
+        ) from error
+
+    return {
+        "applied": True,
+        "baseline_commit": baseline_commit,
+        "changed_files": files,
+        "diff_hash": receipt["diff_hash"],
+        "file_hashes": verification["file_hashes"],
+        "undo_command": _undo_command(files),
+    }

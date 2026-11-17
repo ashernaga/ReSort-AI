@@ -2,6 +2,7 @@
 # Support both direct execution and package imports
 if __package__:
     from .proposal import validate_proposal
+    from .receipts import sign_receipt
     from .patch_applier import (
         get_current_commit,
         ensure_clean_working_tree,
@@ -9,6 +10,7 @@ if __package__:
     )
 else:
     from proposal import validate_proposal
+    from receipts import sign_receipt
     from patch_applier import (
         get_current_commit,
         ensure_clean_working_tree,
@@ -76,6 +78,10 @@ def request_approval(proposal: dict) -> dict | None:
 
     print("\n" + "-" * 60)
     print("Type APPROVE to accept this proposal.")
+    print(
+        "Approving will MODIFY the files listed above in your working "
+        "tree. The change is not committed."
+    )
     print("Anything else will reject it.")
 
     decision = input("\nYour decision: ").strip()
@@ -99,11 +105,13 @@ def request_approval(proposal: dict) -> dict | None:
         print("A new proposal and approval are required.")
         return None
 
-    receipt = {
-        "approved": True,
-        "diff_hash": diff_hash,
-        "baseline_commit": baseline_commit,
-    }
+    receipt = sign_receipt(
+        {
+            "approved": True,
+            "diff_hash": diff_hash,
+            "baseline_commit": baseline_commit,
+        }
+    )
 
     print("\nProposal approved by the user.")
     print("Approval receipt created.")
